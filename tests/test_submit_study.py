@@ -38,7 +38,7 @@ from ena_submission_toolkit.submit_study import (  # noqa: E402
 # Constants
 # ---------------------------------------------------------------------------
 
-_REAL_XSD_DIR = str(Path(__file__).parent.parent / "assets" / "ena_schema")
+_REAL_XSD_DIR = str(Path(__file__).parent.parent / "src" / "ena_submission_toolkit" / "assets" / "ena_schema")
 
 # ---------------------------------------------------------------------------
 # Shared fixtures

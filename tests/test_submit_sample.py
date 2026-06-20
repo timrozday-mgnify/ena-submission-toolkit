@@ -227,7 +227,7 @@ class TestBuildManifest:
 @pytest.fixture
 def real_xsd_dir() -> Path:
     """Return the real ENA schema directory containing SRA.sample.xsd."""
-    return Path(__file__).parent.parent / "assets" / "ena_schema"
+    return Path(__file__).parent.parent / "src" / "ena_submission_toolkit" / "assets" / "ena_schema"
 
 
 class TestValidateManifest:
@@ -362,7 +362,7 @@ def _extract_json(output: str) -> dict[str, Any]:
     return json.loads(output[start:end + 1])
 
 
-_REAL_XSD_DIR = str(Path(__file__).parent.parent / "assets" / "ena_schema")
+_REAL_XSD_DIR = str(Path(__file__).parent.parent / "src" / "ena_submission_toolkit" / "assets" / "ena_schema")
 
 
 class TestMainCli:

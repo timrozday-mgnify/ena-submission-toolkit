@@ -41,6 +41,9 @@ Issues = "https://github.com/timrozday-mgnify/ena-submission-toolkit/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+ena_submission_toolkit = ["assets/ena_schema/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
