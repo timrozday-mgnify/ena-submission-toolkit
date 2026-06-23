@@ -344,7 +344,7 @@ def _extract_json(output: str) -> dict[str, Any]:
 
 
 def _make_study_json(study: dict[str, Any]) -> str:
-    return json.dumps({"studies": [study]})
+    return json.dumps({"Container": {"studies": [study]}})
 
 
 @pytest.fixture

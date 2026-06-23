@@ -243,6 +243,8 @@ def submit_studies(
     test: bool = False,
     hold_until: str | None = None,
     resubmit_with_modify: bool = False,
+    check_for_duplicates: bool = False,
+    force: bool = False,
 ) -> dict[str, list]:
     """Full study submission pipeline. Returns a results dict."""
     env_label = "TEST" if test else "PRODUCTION"
@@ -255,7 +257,26 @@ def submit_studies(
     studies = _load_studies_json(input_file)
     logger.info("Loaded %d study/studies from input", len(studies))
 
-    results: dict[str, list] = {"submitted": [], "modified": [], "failed": []}
+    results: dict[str, list] = {"submitted": [], "modified": [], "failed": [], "duplicates": []}
+
+    if check_for_duplicates:
+        account = [r.model_dump() for r in client.reports.list_projects()]
+        dups = common.find_duplicates_by_alias_title(studies, account, title_field="STUDY_TITLE", entity_label="studies")
+        to_submit, to_modify, duplicate_entries = common.classify_duplicates(
+            studies, dups, title_field="STUDY_TITLE", force=force
+        )
+        results["duplicates"] = duplicate_entries
+        if to_modify:
+            success, accessions = submit_batch(
+                to_modify, "MODIFY", xsd=xsd, hold_until=hold_until, client=client, env_label=env_label,
+            )
+            results["modified"] = accessions if success else []
+            if not success:
+                results["failed"].extend(accessions)
+        studies = to_submit
+
+    if not studies:
+        return results
 
     success, accessions = submit_batch(
         studies, "ADD", xsd=xsd, hold_until=hold_until, client=client, env_label=env_label,
@@ -309,6 +330,8 @@ def main(
     log: Path | None = typer.Option(None, help="Path to log file"),
     output: Path | None = typer.Option(None, help="Path to write JSON accession results (default: stdout)"),
     resubmit_with_modify: bool = typer.Option(False, "--resubmit-with-modify", help="If ADD fails, resubmit all records as MODIFY"),
+    check_for_duplicates: bool = typer.Option(False, "--check-for-duplicates", help="Check records against existing studies on the account by alias/title before submitting"),
+    force: bool = typer.Option(False, "--force", help="With --check-for-duplicates, resubmit matched duplicates as MODIFY instead of skipping them"),
 ) -> None:
     """Submit studies to ENA via the Webin REST API v2."""
     common.setup_logging(log)
@@ -319,6 +342,8 @@ def main(
             input_file, xsd,
             test=test, hold_until=hold_until,
             resubmit_with_modify=resubmit_with_modify,
+            check_for_duplicates=check_for_duplicates,
+            force=force,
         )
     except (ValueError, httpx.HTTPStatusError) as exc:
         logger.error("%s", exc)

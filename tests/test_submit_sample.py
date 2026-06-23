@@ -340,7 +340,7 @@ class TestSubmitManifest:
 # ---------------------------------------------------------------------------
 
 def _make_sample_json(sample: dict[str, Any]) -> str:
-    return json.dumps({"samples": [sample]})
+    return json.dumps({"Container": {"samples": [sample]}})
 
 
 def _extract_json(output: str) -> dict[str, Any]:

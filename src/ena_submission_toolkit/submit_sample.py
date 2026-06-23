@@ -315,6 +315,8 @@ def submit_samples(
     test: bool = False,
     hold_until: str | None = None,
     resubmit_with_modify: bool = False,
+    check_for_duplicates: bool = False,
+    force: bool = False,
 ) -> dict[str, list]:
     """Load, validate, and submit samples to ENA.
 
@@ -324,9 +326,13 @@ def submit_samples(
         test: Use the ENA test service.
         hold_until: Hold samples private until this date (YYYY-MM-DD, max 2 years).
         resubmit_with_modify: If ADD fails, resubmit all records as MODIFY.
+        check_for_duplicates: Check records against existing samples on the
+            account by alias/title before submitting.
+        force: With check_for_duplicates, resubmit matched duplicates as
+            MODIFY instead of skipping them.
 
     Returns:
-        Results dict with keys: submitted, modified, failed.
+        Results dict with keys: submitted, modified, failed, duplicates.
 
     Raises:
         ValueError: On invalid input or failed validation.
@@ -342,7 +348,26 @@ def submit_samples(
     samples = _load_samples_json(input_file)
     logger.info("Loaded %d sample(s)", len(samples))
 
-    results: dict[str, list] = {"submitted": [], "modified": [], "failed": []}
+    results: dict[str, list] = {"submitted": [], "modified": [], "failed": [], "duplicates": []}
+
+    if check_for_duplicates:
+        account = [r.model_dump() for r in client.reports.list_samples()]
+        dups = common.find_duplicates_by_alias_title(samples, account, title_field="SAMPLE_TITLE", entity_label="samples")
+        to_submit, to_modify, duplicate_entries = common.classify_duplicates(
+            samples, dups, title_field="SAMPLE_TITLE", force=force
+        )
+        results["duplicates"] = duplicate_entries
+        if to_modify:
+            success, accessions = submit_batch(
+                to_modify, "MODIFY", xsd=xsd, hold_until=hold_until, client=client, env_label=env_label,
+            )
+            results["modified"] = accessions if success else []
+            if not success:
+                results["failed"].extend(accessions)
+        samples = to_submit
+
+    if not samples:
+        return results
 
     success, accessions = submit_batch(
         samples, "ADD", xsd=xsd, hold_until=hold_until, client=client, env_label=env_label,
@@ -381,6 +406,8 @@ def main(
     log: Path | None = typer.Option(None, help="Path to log file"),
     output: Path | None = typer.Option(None, help="Path to write JSON results (default: stdout)"),
     resubmit_with_modify: bool = typer.Option(False, "--resubmit-with-modify", help="If ADD fails, resubmit all records as MODIFY"),
+    check_for_duplicates: bool = typer.Option(False, "--check-for-duplicates", help="Check records against existing samples on the account by alias/title before submitting"),
+    force: bool = typer.Option(False, "--force", help="With --check-for-duplicates, resubmit matched duplicates as MODIFY instead of skipping them"),
 ) -> None:
     """Submit samples to ENA via the Webin REST API v2."""
     common.setup_logging(log)
@@ -390,6 +417,8 @@ def main(
             input_file, xsd,
             test=test, hold_until=hold_until,
             resubmit_with_modify=resubmit_with_modify,
+            check_for_duplicates=check_for_duplicates,
+            force=force,
         )
     except (ValueError, httpx.HTTPStatusError) as exc:
         logger.error("%s", exc)

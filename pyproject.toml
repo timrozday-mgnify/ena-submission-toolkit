@@ -34,6 +34,9 @@ dev = [
     "pre-commit>=3.7",
 ]
 
+[project.scripts]
+ena-submission-toolkit = "ena_submission_toolkit.cli:app"
+
 [project.urls]
 Homepage = "https://github.com/timrozday-mgnify/ena-submission-toolkit"
 Issues = "https://github.com/timrozday-mgnify/ena-submission-toolkit/issues"
