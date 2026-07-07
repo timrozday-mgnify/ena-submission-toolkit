@@ -49,10 +49,9 @@ _REAL_XSD_DIR = str(Path(__file__).parent.parent / "src" / "ena_submission_toolk
 def basic_study() -> dict[str, Any]:
     return {
         "alias": "test-study-001",
-        "STUDY_TITLE": "A Basic Test Study",
-        "STUDY_ABSTRACT": "An abstract for the test study.",
-        "CENTER_PROJECT_NAME": "My Centre Project",
-        "existing_study_type": "Metagenomics",
+        "TITLE": "A Basic Test Study",
+        "DESCRIPTION": "A description for the test project.",
+        "NAME": "My Centre Project",
     }
 
 
@@ -60,10 +59,9 @@ def basic_study() -> dict[str, Any]:
 def metagenomics_assembly_study() -> dict[str, Any]:
     return {
         "alias": "metagenome-assembly-001",
-        "STUDY_TITLE": "Primary Metagenome Assembly of Soil Sample",
-        "STUDY_ABSTRACT": "Assembly of contigs from metagenome sequencing of soil.",
-        "CENTER_PROJECT_NAME": "Soil Metagenome Project",
-        "existing_study_type": "Metagenomics",
+        "TITLE": "Primary Metagenome Assembly of Soil Sample",
+        "DESCRIPTION": "Assembly of contigs from metagenome sequencing of soil.",
+        "NAME": "Soil Metagenome Project",
     }
 
 
@@ -71,10 +69,8 @@ def metagenomics_assembly_study() -> dict[str, Any]:
 def mag_genome_study() -> dict[str, Any]:
     return {
         "alias": "mag-genome-001",
-        "STUDY_TITLE": "Metagenome-Assembled Genome from Soil Microbiome",
-        "STUDY_ABSTRACT": "A high-quality MAG reconstructed from binned metagenome data.",
-        "existing_study_type": "Other",
-        "new_study_type": "Genome Sequencing",
+        "TITLE": "Metagenome-Assembled Genome from Soil Microbiome",
+        "DESCRIPTION": "A high-quality MAG reconstructed from binned metagenome data.",
     }
 
 
@@ -100,17 +96,17 @@ class TestBuildSubmissionXml:
     def _to_str(root: ET.Element) -> str:
         return ET.tostring(root, encoding="unicode")
 
-    def test_study_title_round_trips(self, basic_study: dict[str, Any]) -> None:
+    def test_title_round_trips(self, basic_study: dict[str, Any]) -> None:
         root = build_submission_xml([basic_study])
         title_el = root.find(".//TITLE")
         assert title_el is not None
-        assert title_el.text == basic_study["STUDY_TITLE"]
+        assert title_el.text == basic_study["TITLE"]
 
-    def test_study_abstract_round_trips(self, basic_study: dict[str, Any]) -> None:
+    def test_description_round_trips(self, basic_study: dict[str, Any]) -> None:
         root = build_submission_xml([basic_study])
         desc_el = root.find(".//DESCRIPTION")
         assert desc_el is not None
-        assert desc_el.text == basic_study["STUDY_ABSTRACT"]
+        assert desc_el.text == basic_study["DESCRIPTION"]
 
     def test_alias_round_trips(self, basic_study: dict[str, Any]) -> None:
         root = build_submission_xml([basic_study])
@@ -118,11 +114,11 @@ class TestBuildSubmissionXml:
         assert project_el is not None
         assert project_el.get("alias") == basic_study["alias"]
 
-    def test_center_project_name_round_trips(self, basic_study: dict[str, Any]) -> None:
+    def test_name_round_trips(self, basic_study: dict[str, Any]) -> None:
         root = build_submission_xml([basic_study])
         name_el = root.find(".//NAME")
         assert name_el is not None
-        assert name_el.text == basic_study["CENTER_PROJECT_NAME"]
+        assert name_el.text == basic_study["NAME"]
 
     def test_submission_project_present(self, basic_study: dict[str, Any]) -> None:
         root = build_submission_xml([basic_study])
@@ -130,29 +126,16 @@ class TestBuildSubmissionXml:
         assert sp_el is not None
         assert sp_el.find("SEQUENCING_PROJECT") is not None
 
-    def test_existing_study_type_emitted_as_project_attribute(self, basic_study: dict[str, Any]) -> None:
-        root = build_submission_xml([basic_study])
-        xml_str = self._to_str(root)
-        assert "existing_study_type" in xml_str
-        assert basic_study["existing_study_type"] in xml_str
-
-    def test_new_study_type_absent_when_not_other(self, basic_study: dict[str, Any]) -> None:
+    def test_legacy_study_type_not_emitted_as_project_attribute(self, basic_study: dict[str, Any]) -> None:
         study = dict(basic_study)
+        study["existing_study_type"] = "Metagenomics"
         study["new_study_type"] = "Genome Sequencing"
         root = build_submission_xml([study])
+        assert "existing_study_type" not in self._to_str(root)
         assert "new_study_type" not in self._to_str(root)
 
-    def test_new_study_type_present_when_existing_is_other(self, mag_genome_study: dict[str, Any]) -> None:
-        root = build_submission_xml([mag_genome_study])
-        tags = [el.text for el in root.findall(".//PROJECT_ATTRIBUTE/TAG") if el.text]
-        values = [el.text for el in root.findall(".//PROJECT_ATTRIBUTE/VALUE") if el.text]
-        assert "existing_study_type" in tags
-        assert "new_study_type" in tags
-        assert "Other" in values
-        assert "Genome Sequencing" in values
-
     def test_no_project_attributes_when_no_study_type(self) -> None:
-        study = {"alias": "no-type", "STUDY_TITLE": "No Type Study"}
+        study = {"alias": "no-type", "TITLE": "No Type Study"}
         root = build_submission_xml([study])
         assert root.find(".//PROJECT_ATTRIBUTES") is None
 
@@ -185,24 +168,16 @@ class TestBuildSubmissionXml:
         assert len(root.findall(".//PROJECT")) == 2
 
     def test_alias_derived_from_title_when_absent(self) -> None:
-        study = {"STUDY_TITLE": "My Derived Title"}
+        study = {"TITLE": "My Derived Title"}
         root = build_submission_xml([study])
         project_el = root.find(".//PROJECT")
         assert project_el is not None
         alias = project_el.get("alias", "")
         assert "_" in alias or alias == "My_Derived_Title"[:50]
 
-    def test_mag_genome_study_has_both_project_attributes(self, mag_genome_study: dict[str, Any]) -> None:
+    def test_project_attributes_absent_for_native_project_fields(self, mag_genome_study: dict[str, Any]) -> None:
         root = build_submission_xml([mag_genome_study])
-        attr_els = root.findall(".//PROJECT_ATTRIBUTE")
-        assert len(attr_els) == 2
-        pairs = {
-            (attr_el.find("TAG").text or ""): (attr_el.find("VALUE").text or "")
-            for attr_el in attr_els
-            if attr_el.find("TAG") is not None and attr_el.find("VALUE") is not None
-        }
-        assert pairs.get("existing_study_type") == "Other"
-        assert pairs.get("new_study_type") == "Genome Sequencing"
+        assert root.find(".//PROJECT_ATTRIBUTES") is None
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +261,13 @@ class TestValidateManifest:
         is_valid, messages = validate_manifest(xml_str.encode(), real_xsd_dir)
         assert not is_valid
 
+    def test_legacy_study_title_without_native_title_fails(self, real_xsd_dir: Path) -> None:
+        xml_bytes = build_manifest([{"STUDY_TITLE": "Legacy Study Title"}])
+        is_valid, messages = validate_manifest(xml_bytes, real_xsd_dir)
+        assert not is_valid
+        assert any("missing alias" in message for message in messages)
+        assert any("missing TITLE" in message for message in messages)
+
     def test_malformed_xml_fails_with_fallback(self, tmp_path: Path) -> None:
         bad_xml = b"<WEBIN><PROJECT_SET><PROJECT alias='x'><TITLE>Unclosed"
         is_valid, _ = validate_manifest(bad_xml, tmp_path)
@@ -351,9 +333,8 @@ def _make_study_json(study: dict[str, Any]) -> str:
 def minimal_study() -> dict[str, Any]:
     return {
         "alias": "cli-metagenomics-001",
-        "STUDY_TITLE": "CLI Metagenomics Test Study",
-        "STUDY_ABSTRACT": "Abstract for CLI test.",
-        "existing_study_type": "Metagenomics",
+        "TITLE": "CLI Metagenomics Test Study",
+        "DESCRIPTION": "Description for CLI test.",
     }
 
 
@@ -388,7 +369,7 @@ class TestMainCli:
         self, runner: CliRunner, minimal_study: dict[str, Any]
     ) -> None:
         existing = StudyReport(
-            title=minimal_study["STUDY_TITLE"],
+            title=minimal_study["TITLE"],
             alias=minimal_study["alias"],
             accession="PRJEB55555",
             secondary_accession="ERP055555",
@@ -415,7 +396,7 @@ class TestMainCli:
         self, runner: CliRunner, minimal_study: dict[str, Any]
     ) -> None:
         existing = StudyReport(
-            title=minimal_study["STUDY_TITLE"],
+            title=minimal_study["TITLE"],
             alias=minimal_study["alias"],
             accession="PRJEB66666",
             secondary_accession="ERP066666",
@@ -494,39 +475,11 @@ class TestMainCli:
 
 
 @pytest.mark.parametrize(
-    "study_type,new_type,expect_new_type",
-    [
-        ("Metagenomics", None, False),
-        ("RNASeq", None, False),
-        ("Other", "Genome Sequencing", True),
-        ("Other", "Transcriptome Analysis", True),
-        ("Other", None, False),
-    ],
-)
-def test_project_attribute_new_study_type_conditional(
-    study_type: str, new_type: str | None, expect_new_type: bool
-) -> None:
-    study: dict[str, Any] = {
-        "alias": "param-test",
-        "STUDY_TITLE": "Parametrized Study",
-        "existing_study_type": study_type,
-    }
-    if new_type is not None:
-        study["new_study_type"] = new_type
-    root = build_submission_xml([study])
-    tags = [el.text for el in root.findall(".//PROJECT_ATTRIBUTE/TAG") if el.text]
-    if expect_new_type:
-        assert "new_study_type" in tags
-    else:
-        assert "new_study_type" not in tags
-
-
-@pytest.mark.parametrize(
     "hold_until,expect_hold",
     [("2027-03-01", True), ("2028-12-31", True), (None, False)],
 )
 def test_hold_until_element_conditional(hold_until: str | None, expect_hold: bool) -> None:
-    study = {"alias": "hold-test", "STUDY_TITLE": "Hold Date Test"}
+    study = {"alias": "hold-test", "TITLE": "Hold Date Test"}
     root = build_submission_xml([study], hold_until=hold_until)
     hold_el = root.find(".//HOLD")
     if expect_hold:
@@ -538,7 +491,7 @@ def test_hold_until_element_conditional(hold_until: str | None, expect_hold: boo
 
 @pytest.mark.parametrize("action", ["ADD", "MODIFY"])
 def test_submission_action_element_present(action: str) -> None:
-    study = {"alias": "action-test", "STUDY_TITLE": "Action Test"}
+    study = {"alias": "action-test", "TITLE": "Action Test"}
     root = build_submission_xml([study], action=action)
     xml_str = ET.tostring(root, encoding="unicode")
     assert f"<{action}" in xml_str or f"<{action}/>" in xml_str

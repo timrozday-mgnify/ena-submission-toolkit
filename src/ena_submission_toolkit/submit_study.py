@@ -65,29 +65,22 @@ def build_submission_xml(
 
 
 def _add_project_element(project_set: ET.Element, study: dict[str, Any]) -> None:
-    alias = study.get("alias", study.get("STUDY_TITLE", "").replace(" ", "_")[:50])
+    title_text = study.get("TITLE", "")
+    alias = study.get("alias", title_text.replace(" ", "_")[:50])
     project = ET.SubElement(project_set, "PROJECT")
     project.set("alias", alias)
 
-    name_text = study.get("CENTER_PROJECT_NAME", alias)
+    name_text = study.get("NAME", "")
     if name_text:
         ET.SubElement(project, "NAME").text = name_text
 
-    ET.SubElement(project, "TITLE").text = study.get("STUDY_TITLE", "")
+    ET.SubElement(project, "TITLE").text = title_text
 
-    desc_text = study.get("STUDY_ABSTRACT") or study.get("STUDY_DESCRIPTION", "")
+    desc_text = study.get("DESCRIPTION", "")
     if desc_text:
         ET.SubElement(project, "DESCRIPTION").text = desc_text
 
     ET.SubElement(ET.SubElement(project, "SUBMISSION_PROJECT"), "SEQUENCING_PROJECT")
-
-    study_type = study.get("existing_study_type")
-    if study_type:
-        attrs = ET.SubElement(project, "PROJECT_ATTRIBUTES")
-        _add_project_attribute(attrs, "existing_study_type", study_type)
-        new_type = study.get("new_study_type")
-        if new_type and study_type == "Other":
-            _add_project_attribute(attrs, "new_study_type", new_type)
 
 
 def _add_project_attribute(parent: ET.Element, tag_text: str, value_text: str) -> None:
@@ -120,19 +113,27 @@ def _validate_study_xml_structure(xml_bytes: bytes, messages: list[str]) -> tupl
         messages.append("ERROR: No PROJECT elements found")
         return False, messages
 
+    is_valid = True
     for proj in projects:
+        project_valid = True
         alias = proj.get("alias", "<no alias>")
+        if not alias or alias == "<no alias>":
+            messages.append("ERROR: PROJECT missing alias")
+            project_valid = False
         title = proj.find("TITLE")
         if title is None or not title.text:
             messages.append(f"ERROR: PROJECT '{alias}' missing TITLE")
-            return False, messages
+            project_valid = False
         sp = proj.find("SUBMISSION_PROJECT")
         if sp is None:
             messages.append(f"ERROR: PROJECT '{alias}' missing SUBMISSION_PROJECT")
-            return False, messages
-        messages.append(f"OK: PROJECT '{alias}' has required elements")
+            project_valid = False
+        if project_valid:
+            messages.append(f"OK: PROJECT '{alias}' has required elements")
+        else:
+            is_valid = False
 
-    return True, messages
+    return is_valid, messages
 
 
 # -------------------------------------------------------------------
@@ -152,12 +153,17 @@ def build_manifest(
 
 def validate_manifest(xml_bytes: bytes, xsd_dir: str | Path) -> tuple[bool, list[str]]:
     """Validate study XML against ENA.project.xsd."""
-    return common.validate_xml_against_xsd(
+    is_valid, messages = common.validate_xml_against_xsd(
         xml_bytes, xsd_dir,
         xsd_filename="ENA.project.xsd",
         fragment_tag="PROJECT_SET",
         fallback_checker=_validate_study_xml_structure,
     )
+    if not is_valid:
+        return is_valid, messages
+
+    structure_ok, semantic_messages = _validate_study_xml_structure(xml_bytes, [])
+    return structure_ok, messages + semantic_messages
 
 
 def submit_manifest(
@@ -261,9 +267,9 @@ def submit_studies(
 
     if check_for_duplicates:
         account = [r.model_dump() for r in client.reports.list_projects()]
-        dups = common.find_duplicates_by_alias_title(studies, account, title_field="STUDY_TITLE", entity_label="studies")
+        dups = common.find_duplicates_by_alias_title(studies, account, title_field="TITLE", entity_label="studies")
         to_submit, to_modify, duplicate_entries = common.classify_duplicates(
-            studies, dups, title_field="STUDY_TITLE", force=force
+            studies, dups, title_field="TITLE", force=force
         )
         results["duplicates"] = duplicate_entries
         if to_modify:
