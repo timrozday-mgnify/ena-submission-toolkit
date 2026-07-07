@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
-    "ena-api-client @ git+https://github.com/timrozday-mgnify/ena-api-client.git@v0.1.0",
+    "ena-api-client @ git+https://github.com/timrozday-mgnify/ena-api-client.git@v0.1.1",
     "linkml-lib @ git+https://github.com/timrozday-mgnify/linkml-lib.git@v0.1.0",
     "httpx>=0.27",
     "lxml>=5.0",

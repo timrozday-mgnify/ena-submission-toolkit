@@ -195,7 +195,7 @@ def submit_manifest(
         for r in receipt.accessions
         if r.entity_type != "SUBMISSION"
     ]
-    return receipt.success, accessions, receipt.messages + receipt.errors
+    return receipt.success, accessions, receipt.messages + receipt.warnings + receipt.errors
 
 
 def submit_batch(
