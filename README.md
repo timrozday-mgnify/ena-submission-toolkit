@@ -37,7 +37,10 @@ makes an ENA request at all.
   `list_records` (Reports API rows as plain dicts, optionally status-filtered), `editable_columns`,
   `modify_records` (fetch the record's current XML, patch the edited fields, resubmit as a MODIFY —
   never rebuilt from a report row, which would drop everything ENA holds but does not report),
-  `record_action` (release/hold/suppress/cancel/kill) and `find_runs_by_experiment_alias`.
+  `preview_modify_records` (the same manifests, returned instead of sent, so a caller can show
+  exactly what a MODIFY would do before committing to it — `modify_records` echoes the document it
+  submitted, so the two can be compared), `record_action` (release/hold/suppress/cancel/kill) and
+  `find_runs_by_experiment_alias`.
   Credentials are passed per call as `records.Credentials`, so a multi-user server never needs
   process-wide state.
 - `ena_submission_toolkit.prepare_dh_output` — rename a DataHarmonizer export's fields to their

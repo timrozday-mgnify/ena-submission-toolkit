@@ -69,6 +69,9 @@ _EDITABLE: Final[dict[str, dict[str, tuple[str, str]]]] = {
 
 DEFAULT_MAX_RESULTS: Final = 5000
 
+#: Names a MODIFY submission when the caller does not.
+DEFAULT_MODIFY_ALIAS: Final = "ena-submission-toolkit-modify"
+
 
 @dataclass(frozen=True)
 class Credentials:
@@ -213,13 +216,81 @@ def _modify_document(record: etree._Element, entity: str, submission_alias: str)
     return etree.tostring(webin, encoding="UTF-8", xml_declaration=True)
 
 
+def _build_manifests(
+    client: WebinClient,
+    entity: str,
+    records: list[dict[str, Any]],
+    submission_alias: str,
+) -> Iterator[tuple[dict[str, Any], bytes | None]]:
+    """Build one MODIFY document per record, yielding ``(result, document)``.
+
+    The single place a MODIFY manifest is constructed, so what
+    :func:`preview_modify_records` shows a user is byte-for-byte what
+    :func:`modify_records` submits. ``document`` is ``None`` for a record that
+    could not be built — its ``result`` carries why, and nothing is sent.
+    """
+    _, record_tag = _XML_TAGS[entity]
+    for entry in records:
+        accession = str(entry.get("accession") or "")
+        changes = dict(entry.get("changes") or {})
+        result: dict[str, Any] = {
+            "accession": accession,
+            "changes": changes,
+            "success": False,
+            "messages": [],
+            "xml": "",
+        }
+        if not accession or not changes:
+            result["messages"] = ["Nothing to change"]
+            yield result, None
+            continue
+        try:
+            record = _find_record(etree.fromstring(client.browser.xml(accession)), record_tag)
+            for field, value in changes.items():
+                _apply_change(record, entity, field, value)
+            document = _modify_document(record, entity, submission_alias)
+        except Exception as exc:  # noqa: BLE001 - one bad record must not sink the batch
+            result["messages"] = [str(exc)]
+            yield result, None
+            continue
+        result["xml"] = document.decode("utf-8")
+        result["success"] = True  # the manifest was built; whether ENA accepts it is another matter
+        yield result, document
+
+
+def preview_modify_records(
+    creds: Credentials,
+    entity: str,
+    records: list[dict[str, Any]],
+    *,
+    test: bool,
+    submission_alias: str = DEFAULT_MODIFY_ALIAS,
+) -> dict[str, Any]:
+    """Build the MODIFY manifests for a change set without submitting anything.
+
+    Same arguments as :func:`modify_records`, same work up to the point of
+    submission — each record's current XML is fetched and patched — but the
+    documents are returned instead of sent, so a user can read what would go to
+    ENA before deciding to send it.
+
+    Returns ``{"success": every manifest built, "results": [{accession,
+    changes, success, messages, xml}]}``. ``success`` here means "this manifest
+    was built", never "ENA accepted it": nothing was submitted.
+    """
+    if entity not in _XML_TAGS:
+        raise ValueError(f"{entity} records cannot be modified")
+    with webin_client(creds, test) as client:
+        results = [result for result, _ in _build_manifests(client, entity, records, submission_alias)]
+    return {"success": all(r["success"] for r in results), "results": results}
+
+
 def modify_records(
     creds: Credentials,
     entity: str,
     records: list[dict[str, Any]],
     *,
     test: bool,
-    submission_alias: str = "ena-submission-toolkit-modify",
+    submission_alias: str = DEFAULT_MODIFY_ALIAS,
 ) -> dict[str, Any]:
     """Apply a change set to ENA, one MODIFY submission per record.
 
@@ -236,33 +307,33 @@ def modify_records(
     record whose XML cannot be fetched is reported as failed and **not**
     submitted: a partial document is worse than no submission.
 
-    Returns ``{"success": all succeeded, "results": [{accession, success,
-    messages}]}``.
+    Returns ``{"success": all succeeded, "results": [{accession, changes,
+    success, messages, info, warnings, errors, xml}]}``. ``xml`` is the exact
+    document submitted — the same bytes :func:`preview_modify_records` would
+    have shown — so a caller can prove what it sent. ``messages`` stays the
+    flat "everything ENA said" list; ``info``/``warnings``/``errors`` are that
+    same receipt split up.
     """
     if entity not in _XML_TAGS:
         raise ValueError(f"{entity} records cannot be modified")
 
-    _, record_tag = _XML_TAGS[entity]
     results: list[dict[str, Any]] = []
-
     with webin_client(creds, test) as client:
-        for entry in records:
-            accession = str(entry.get("accession") or "")
-            changes = entry.get("changes") or {}
-            result: dict[str, Any] = {"accession": accession, "success": False, "messages": []}
-            if not accession or not changes:
-                result["messages"] = ["Nothing to change"]
+        for result, document in _build_manifests(client, entity, records, submission_alias):
+            if document is None:
                 results.append(result)
                 continue
             try:
-                record = _find_record(etree.fromstring(client.browser.xml(accession)), record_tag)
-                for field, value in changes.items():
-                    _apply_change(record, entity, field, value)
-                receipt = client.submit.xml(_modify_document(record, entity, submission_alias))
+                receipt = client.submit.xml(document)
                 result["success"] = receipt.success
-                result["messages"] = receipt.messages + receipt.warnings + receipt.errors
+                result["info"] = list(receipt.messages)
+                result["warnings"] = list(receipt.warnings)
+                result["errors"] = list(receipt.errors)
+                result["messages"] = result["info"] + result["warnings"] + result["errors"]
             except Exception as exc:  # noqa: BLE001 - one bad record must not sink the batch
+                result["success"] = False
                 result["messages"] = [str(exc)]
+                result["errors"] = [str(exc)]
             results.append(result)
 
     return {"success": all(r["success"] for r in results), "results": results}

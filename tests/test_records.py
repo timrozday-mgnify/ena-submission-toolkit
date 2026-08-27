@@ -150,6 +150,45 @@ class TestModifyRecords:
         with pytest.raises(ValueError, match="cannot be modified"):
             records.modify_records(CREDS, "files", [{"accession": "x", "changes": {}}], test=True)
 
+    def test_result_carries_the_document_it_submitted(self, fake_client):
+        result = records.modify_records(
+            CREDS, "samples", [{"accession": "ERS9000001", "changes": {"title": "New title"}}], test=True
+        )
+        entry = result["results"][0]
+        assert entry["xml"].encode() == fake_client.submitted[0]
+        assert entry["changes"] == {"title": "New title"}
+        assert entry["info"] == ["INFO: ok"]
+
+
+class TestPreviewModifyRecords:
+    def test_builds_the_same_document_it_would_submit(self, fake_client):
+        change = [{"accession": "ERS9000001", "changes": {"title": "New title"}}]
+        preview = records.preview_modify_records(CREDS, "samples", change, test=True)
+        assert preview["success"] is True
+        assert fake_client.submitted == []  # nothing left the process
+
+        records.modify_records(CREDS, "samples", change, test=True)
+        assert preview["results"][0]["xml"].encode() == fake_client.submitted[0]
+
+    def test_a_bad_change_fails_the_manifest_not_the_batch(self, fake_client):
+        preview = records.preview_modify_records(
+            CREDS,
+            "samples",
+            [
+                {"accession": "ERS9000001", "changes": {"status": "PUBLIC"}},
+                {"accession": "ERS9000001", "changes": {"title": "ok"}},
+            ],
+            test=True,
+        )
+        assert preview["success"] is False
+        assert "not editable" in preview["results"][0]["messages"][0]
+        assert preview["results"][0]["xml"] == ""
+        assert preview["results"][1]["success"] is True
+
+    def test_rejects_unmodifiable_entity(self, fake_client):
+        with pytest.raises(ValueError, match="cannot be modified"):
+            records.preview_modify_records(CREDS, "files", [{"accession": "x", "changes": {}}], test=True)
+
 
 class TestRecordAction:
     def test_runs_the_action(self, fake_client):
