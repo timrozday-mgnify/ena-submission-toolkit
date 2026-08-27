@@ -58,14 +58,36 @@ _XML_TAGS: Final[dict[str, tuple[str, str]]] = {
 #
 #   ("attr", name)  -> an attribute of the record element
 #   ("child", name) -> the text of a direct child element
+# A ``child`` name is an ElementPath, so a field nested several levels down
+# (an experiment's library descriptor, its platform) needs no extra machinery.
 _EDITABLE: Final[dict[str, dict[str, tuple[str, str]]]] = {
     "studies": {"alias": ("attr", "alias"), "title": ("child", "TITLE")},
     "samples": {"alias": ("attr", "alias"), "title": ("child", "TITLE")},
-    "experiments": {"alias": ("attr", "alias"), "title": ("child", "TITLE")},
+    "experiments": {
+        "alias": ("attr", "alias"),
+        "title": ("child", "TITLE"),
+        "design_description": ("child", "DESIGN/DESIGN_DESCRIPTION"),
+        "library_name": ("child", "DESIGN/LIBRARY_DESCRIPTOR/LIBRARY_NAME"),
+        "library_strategy": ("child", "DESIGN/LIBRARY_DESCRIPTOR/LIBRARY_STRATEGY"),
+        "library_source": ("child", "DESIGN/LIBRARY_DESCRIPTOR/LIBRARY_SOURCE"),
+        "library_selection": ("child", "DESIGN/LIBRARY_DESCRIPTOR/LIBRARY_SELECTION"),
+        # The instrument sits under whichever platform element the experiment
+        # was registered with (ILLUMINA, OXFORD_NANOPORE, ...), hence the
+        # wildcard: the model can be corrected, the platform cannot be swapped.
+        "instrument_model": ("child", "PLATFORM/*/INSTRUMENT_MODEL"),
+    },
     "analyses": {"alias": ("attr", "alias"), "title": ("child", "TITLE")},
-    "runs": {"alias": ("attr", "alias")},
+    "runs": {
+        "alias": ("attr", "alias"),
+        "title": ("child", "TITLE"),
+        "run_center": ("attr", "run_center"),
+        "run_date": ("attr", "run_date"),
+    },
     "files": {},
 }
+
+#: How many accessions to ask the Browser API for in one request.
+_XML_BATCH: Final = 100
 
 DEFAULT_MAX_RESULTS: Final = 5000
 
@@ -130,6 +152,9 @@ def list_records(
     *,
     test: bool,
     status: str = "all",
+    search: str = "",
+    linked_to: str = "",
+    unlinked: bool = False,
     max_results: int = DEFAULT_MAX_RESULTS,
 ) -> list[dict[str, Any]]:
     """List the account's records for one entity, as plain dicts.
@@ -140,6 +165,31 @@ def list_records(
 
     Report models allow extra fields, so a row carries whatever the Reports
     API sent — a grid can show columns this library has never heard of.
+
+    Run rows additionally carry ``process_status``/``process_date``/
+    ``process_error`` from the run-processing report: whether ENA has finished
+    validating and archiving the run's read files, which the run report itself
+    does not say.
+
+    The remaining criteria are applied here, not by ENA. The Webin Reports API
+    takes only ``max-results``, a release ``status``, and (on the process/file
+    reports) a processing status — there is no free-text search and no way to
+    ask it a relational question. So:
+
+    ``search``
+        Whitespace-separated terms, each of which must appear (case-insensitive
+        substring) somewhere in the row.
+    ``linked_to``
+        An accession of any entity; keeps the rows that share a submission
+        lineage with it — "the samples in study PRJEB123", "the reads for
+        sample ERS9000001". See :func:`_link_index` for what "linked" means.
+    ``unlinked``
+        Keeps only the rows nothing else points at: samples with no experiment
+        or read against them, studies with nothing in them.
+
+    ``linked_to`` and ``unlinked`` cost three extra report requests (the
+    experiment/run/analysis rows the lineage is built from); ``search`` and
+    ``status`` cost nothing.
     """
     method = REPORT_METHODS.get(entity)
     if method is None:
@@ -148,7 +198,171 @@ def list_records(
         # list_runs() already joins against list_experiments() to fill in
         # study_accession/sample_accession when the run's own report omits them.
         rows = [record.model_dump() for record in getattr(client.reports, method)(max_results=max_results)]
+        if entity == "runs" and rows:
+            # Metadata being registered and read files being archived are two
+            # different events; only the second answers "is my submission
+            # through yet?", and it lives in a separate report.
+            processing = _run_processing(client, max_results)
+            for row in rows:
+                row.update(processing.get(row.get("accession") or "", {}))
+        if linked_to or unlinked:
+            index = _link_index(client, max_results)
+            related = _expand(index, linked_to) if linked_to else set()
+            rows = [row for row in rows if _keep_by_link(row, index, related, unlinked=unlinked)]
+    if search:
+        rows = _filter_by_search(rows, search)
     return rows if entity == "files" else _filter_by_status(rows, status)
+
+
+def _run_processing(client: WebinClient, max_results: int) -> dict[str, dict[str, Any]]:
+    """Run accession -> the file-processing columns to merge into its row."""
+    processing: dict[str, dict[str, Any]] = {}
+    for report in client.reports.list_run_processes(max_results=max_results):
+        if not report.run_accession:
+            continue
+        processing[report.run_accession] = {
+            "process_status": report.process_status,
+            "process_date": report.process_date,
+            "process_error": report.error_message,
+        }
+    return processing
+
+
+def _filter_by_search(rows: list[dict[str, Any]], search: str) -> list[dict[str, Any]]:
+    """Rows in which every whitespace-separated term appears somewhere."""
+    terms = search.lower().split()
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        haystack = " ".join(str(value) for value in row.values() if value is not None).lower()
+        if all(term in haystack for term in terms):
+            kept.append(row)
+    return kept
+
+
+def _row_ids(row: dict[str, Any]) -> set[str]:
+    """The accessions a row answers to — a study is both a PRJ and an ERP.
+
+    ``run_accession`` is here for file rows, whose own "accession" is not what
+    anything links to; on every other entity the field is absent.
+    """
+    return {str(row.get(key) or "") for key in ("accession", "secondary_accession", "run_accession")} - {""}
+
+
+def _link_index(client: WebinClient, max_results: int) -> dict[str, set[str]]:
+    """Accession -> every accession sharing a submission lineage with it.
+
+    An experiment is the hub of an ENA submission: it names its study and its
+    sample, and a run names its experiment. An analysis names its study. Each
+    such record is therefore a group of accessions that belong together, and
+    two accessions are "linked" when some group holds both — which makes
+    "samples in study X" and "reads for sample Y" the same lookup.
+
+    ponytail: one hop only. A ->PRJ<- B relates two samples in the same study,
+    which is what the questions being asked here mean by related; a graph
+    walk would be a different, longer answer.
+    """
+    groups: list[set[str]] = []
+    for exp in client.reports.list_experiments(max_results=max_results):
+        groups.append(
+            {
+                exp.accession,
+                exp.secondary_accession,
+                exp.study_accession,
+                exp.sample_accession,
+            }
+        )
+    # Raw run rows would do, but list_runs() has already filled in the
+    # study/sample a run's own report omits, so use what it worked out.
+    for run in client.reports.list_runs(max_results=max_results):
+        groups.append(
+            {
+                run.accession,
+                run.secondary_accession,
+                run.experiment_accession,
+                run.study_accession,
+                run.sample_accession,
+            }
+        )
+    for analysis in client.reports.list_analyses(max_results=max_results):
+        groups.append({analysis.accession, analysis.secondary_accession, analysis.study_accession})
+
+    index: dict[str, set[str]] = {}
+    for group in groups:
+        group.discard("")
+        for accession in group:
+            index.setdefault(accession, set()).update(group)
+    return index
+
+
+def _expand(index: dict[str, set[str]], accession: str) -> set[str]:
+    """Everything linked to ``accession``, including itself."""
+    return index.get(accession, set()) | {accession}
+
+
+def _keep_by_link(
+    row: dict[str, Any],
+    index: dict[str, set[str]],
+    related: set[str],
+    *,
+    unlinked: bool,
+) -> bool:
+    ids = _row_ids(row)
+    if unlinked:
+        # Linked means something *other than this record* is in its group;
+        # every record is trivially in its own.
+        if any(index.get(accession, set()) - ids for accession in ids):
+            return False
+    return bool(ids & related) if related else True
+
+
+def read_editable_fields(
+    creds: Credentials,
+    entity: str,
+    accessions: list[str],
+    *,
+    test: bool,
+) -> dict[str, dict[str, Any]]:
+    """The *current* value of every editable field, per accession.
+
+    The Reports API returns a handful of columns per record — for a run, not
+    even its title; for an experiment, nothing about its library or
+    instrument. Those fields only exist in the record's XML, so a grid that
+    wants to edit them has to be shown them first. This reads them, in batches,
+    from the same Browser API documents :func:`modify_records` patches, so what
+    the user edits is what ENA currently holds.
+
+    Returns ``{accession: {field: value}}``, omitting records ENA does not
+    hold and fields the record's XML does not carry. Fields are exactly
+    :func:`editable_columns` for the entity — an entity with none (files)
+    costs no request at all.
+    """
+    mapping = _EDITABLE.get(entity)
+    if entity not in _XML_TAGS or not mapping:
+        return {}
+    wanted = [a for a in dict.fromkeys(accessions) if is_accession(a)]
+    if not wanted:
+        return {}
+
+    _, record_tag = _XML_TAGS[entity]
+    found: dict[str, dict[str, Any]] = {}
+    with webin_client(creds, test) as client:
+        for start in range(0, len(wanted), _XML_BATCH):
+            batch = wanted[start : start + _XML_BATCH]
+            try:
+                payload = client.browser.xml_many(batch)
+            except LookupError:
+                continue  # ENA holds none of this batch; the others still matter
+            for record in etree.fromstring(payload).iter(record_tag):
+                accession = record.get("accession") or ""
+                if not accession:
+                    continue
+                values: dict[str, Any] = {}
+                for field, (kind, name) in mapping.items():
+                    value = record.get(name) if kind == "attr" else record.findtext(name)
+                    if value is not None:
+                        values[field] = value
+                found[accession] = values
+    return found
 
 
 def find_runs_by_experiment_alias(

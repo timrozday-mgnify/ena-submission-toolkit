@@ -34,7 +34,16 @@ makes an ENA request at all.
 - `ena_submission_toolkit.submit_sample` — build/validate/submit ENA sample XML, with optional
   schema-driven unit normalisation via `submit_batch(..., unit_rules=...)`.
 - `ena_submission_toolkit.records` — browse and change what a Webin account already holds:
-  `list_records` (Reports API rows as plain dicts, optionally status-filtered), `editable_columns`,
+  `list_records` (Reports API rows as plain dicts, optionally filtered by release status, by
+  free-text `search`, or by submission lineage — `linked_to="PRJEB123"` for the samples in a
+  study, `unlinked=True` for the samples no experiment or read points at. The Reports API
+  itself takes only `max-results` and a status, so everything beyond that is joined and
+  filtered here, from the experiment/run/analysis rows; run rows also carry
+  `process_status`/`process_date`/`process_error` from the run-processing report, which is how a
+  submitter sees whether ENA has finished archiving the read files as opposed to merely registering
+  the run), `editable_columns`, `read_editable_fields` (the current value of the editable fields
+  that only exist in the record XML — a run's title, an experiment's library and instrument — read
+  in batches, so a grid can show them before anyone edits them),
   `modify_records` (fetch the record's current XML, patch the edited fields, resubmit as a MODIFY —
   never rebuilt from a report row, which would drop everything ENA holds but does not report),
   `preview_modify_records` (the same manifests, returned instead of sent, so a caller can show
