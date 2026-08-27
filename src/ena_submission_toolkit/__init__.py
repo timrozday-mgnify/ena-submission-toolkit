@@ -10,6 +10,9 @@ Modules:
                             Container-unwrap, result I/O.
     submit_study        -- build/validate/submit ENA study (project) XML.
     submit_sample       -- build/validate/submit ENA sample XML.
+    records             -- browse and change the records held under a Webin
+                            account: list, MODIFY a field, run lifecycle
+                            actions.
     prepare_dh_output    -- rename a DataHarmonizer export's fields to their
                             LinkML annotations.id values.
 """
