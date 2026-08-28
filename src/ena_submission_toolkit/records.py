@@ -15,6 +15,7 @@ or writes the environment or the disk — for env-var credentials use
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -365,6 +366,11 @@ def _keep_by_link(
     return bool(ids & related) if related else True
 
 
+def _read_field(record: etree._Element, kind: str, name: str) -> str | None:
+    """The record XML's current value for one editable field, or ``None``."""
+    return record.get(name) if kind == "attr" else record.findtext(name)
+
+
 def read_editable_fields(
     creds: Credentials,
     entity: str,
@@ -408,7 +414,7 @@ def read_editable_fields(
                     continue
                 values: dict[str, Any] = {}
                 for field, (kind, name) in mapping.items():
-                    value = record.get(name) if kind == "attr" else record.findtext(name)
+                    value = _read_field(record, kind, name)
                     if value is not None:
                         values[field] = value
                 found[accession] = values
@@ -503,6 +509,8 @@ def _build_manifests(
             "success": False,
             "messages": [],
             "xml": "",
+            "previous": {},
+            "undo_xml": "",
         }
         if not accession or not changes:
             result["messages"] = ["Nothing to change"]
@@ -510,6 +518,18 @@ def _build_manifests(
             continue
         try:
             record = _find_record(etree.fromstring(client.browser.xml(accession)), record_tag)
+            # What ENA holds right now, before anything is patched: the values
+            # to put back, and a ready-made MODIFY that puts the whole record
+            # back. _modify_document() re-parents the element it is given, so
+            # the undo gets a copy.
+            result["previous"] = {
+                field: _read_field(record, *_EDITABLE[entity][field])
+                for field in changes
+                if field in _EDITABLE.get(entity, {})
+            }
+            result["undo_xml"] = _modify_document(
+                copy.deepcopy(record), entity, submission_alias
+            ).decode("utf-8")
             for field, value in changes.items():
                 _apply_change(record, entity, field, value)
             document = _modify_document(record, entity, submission_alias)
@@ -538,8 +558,10 @@ def preview_modify_records(
     ENA before deciding to send it.
 
     Returns ``{"success": every manifest built, "results": [{accession,
-    changes, success, messages, xml}]}``. ``success`` here means "this manifest
-    was built", never "ENA accepted it": nothing was submitted.
+    changes, success, messages, xml, previous, undo_xml}]}``. ``success`` here
+    means "this manifest was built", never "ENA accepted it": nothing was
+    submitted. ``undo_xml`` is the manifest that would put the record back as
+    it is now — see :func:`undo_changes`.
     """
     if entity not in _XML_TAGS:
         raise ValueError(f"{entity} records cannot be modified")
@@ -601,6 +623,36 @@ def modify_records(
             results.append(result)
 
     return {"success": all(r["success"] for r in results), "results": results}
+
+
+def undo_changes(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn a :func:`modify_records` result into the change set that undoes it.
+
+    Every result carries ``previous`` — what each edited field held in ENA
+    immediately before the MODIFY was built — so the reverse change set is
+    just that, per record:
+
+        >>> done = modify_records(creds, "samples", edits, test=True)   # doctest: +SKIP
+        >>> modify_records(creds, "samples", undo_changes(done), test=True)  # doctest: +SKIP
+
+    Only records whose manifest was actually built are included; a record that
+    failed before the patch changed nothing to put back. Fields ENA's XML did
+    not carry (``previous`` value ``None``) are dropped: there is no value to
+    restore, and a MODIFY cannot unset a field.
+
+    Feed the result to :func:`preview_modify_records` first to show a user the
+    revert before sending it. Note that this re-fetches and re-patches each
+    record at submission time, so an undo restores the fields it changed and
+    leaves any *other* later edit alone — unlike replaying ``undo_xml``, the
+    pre-edit document each result also carries, which would put the record
+    back wholesale.
+    """
+    undo: list[dict[str, Any]] = []
+    for row in result.get("results", []):
+        changes = {field: value for field, value in (row.get("previous") or {}).items() if value is not None}
+        if changes:
+            undo.append({"accession": row["accession"], "changes": changes})
+    return undo
 
 
 # ---------------------------------------------------------------------------

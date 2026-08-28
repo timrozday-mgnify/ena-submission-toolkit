@@ -48,7 +48,10 @@ makes an ENA request at all.
   never rebuilt from a report row, which would drop everything ENA holds but does not report),
   `preview_modify_records` (the same manifests, returned instead of sent, so a caller can show
   exactly what a MODIFY would do before committing to it — `modify_records` echoes the document it
-  submitted, so the two can be compared), `record_action` (release/hold/suppress/cancel/kill) and
+  submitted, so the two can be compared), `undo_changes` (every result also carries `previous`, the
+  edited fields' values as ENA held them just before the change, and `undo_xml`, a complete MODIFY
+  manifest restoring the pre-edit document — so a caller can keep a stack of applied changes and
+  walk back down it), `record_action` (release/hold/suppress/cancel/kill) and
   `find_runs_by_experiment_alias`.
   Credentials are passed per call as `records.Credentials`, so a multi-user server never needs
   process-wide state.
