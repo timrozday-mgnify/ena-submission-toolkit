@@ -432,6 +432,38 @@ class TestPreviewModifyRecords:
             records.preview_modify_records(CREDS, "files", [{"accession": "x", "changes": {}}], test=True)
 
 
+class TestUndoChanges:
+    def test_reverts_a_change_back_to_what_ena_held(self, fake_client):
+        change = [{"accession": "ERS9000001", "changes": {"title": "New title", "alias": "new-alias"}}]
+        done = records.modify_records(CREDS, "samples", change, test=True)
+
+        undo = records.undo_changes(done)
+        assert undo == [
+            {"accession": "ERS9000001", "changes": {"title": "Old title", "alias": "old-alias"}}
+        ]
+
+        # Applying it puts the document back where it started.
+        records.modify_records(CREDS, "samples", undo, test=True)
+        reverted = etree.fromstring(fake_client.submitted[-1]).find(".//SAMPLE")
+        assert reverted.findtext("TITLE") == "Old title"
+        assert reverted.get("alias") == "old-alias"
+
+    def test_undo_xml_is_the_pre_edit_document(self, fake_client):
+        done = records.modify_records(
+            CREDS, "samples", [{"accession": "ERS9000001", "changes": {"title": "New title"}}], test=True
+        )
+        record = etree.fromstring(done["results"][0]["undo_xml"].encode()).find(".//SAMPLE")
+        assert record.findtext("TITLE") == "Old title"
+        # Attributes ENA holds but does not report survive the round trip.
+        assert record.find(".//SAMPLE_ATTRIBUTE/VALUE").text == "v"
+
+    def test_a_failed_record_has_nothing_to_undo(self, fake_client):
+        done = records.modify_records(
+            CREDS, "samples", [{"accession": "ERS9000001", "changes": {"status": "PUBLIC"}}], test=True
+        )
+        assert records.undo_changes(done) == []
+
+
 class TestRecordAction:
     def test_runs_the_action(self, fake_client):
         result = records.record_action(CREDS, "ERS9000001", "release", test=True)
