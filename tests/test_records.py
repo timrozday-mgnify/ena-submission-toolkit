@@ -123,6 +123,49 @@ class TestListRecords:
         assert [r["accession"] for r in records.list_records(CREDS, "samples", test=True, status="private")] == ["A"]
         assert len(records.list_records(CREDS, "samples", test=True, status="all")) == 2
 
+    def test_full_fields_merges_the_portal_answer(self, fake_client, monkeypatch):
+        calls: list[tuple] = []
+
+        def fake_fields(entity, accessions, *, username="", password=""):
+            calls.append((entity, list(accessions), username))
+            return {"ERR1": {"run_accession": "ERR1", "instrument_model": "NovaSeq", "status": "PUBLIC"}}
+
+        monkeypatch.setattr(records.portal, "fields_for_accessions", fake_fields)
+        fake_client._rows = [FakeRow(accession="ERR1", status="PRIVATE")]
+        rows = records.list_records(CREDS, "runs", test=False, full_fields=True)
+        assert rows[0]["instrument_model"] == "NovaSeq"
+        # The report's own value survives a collision.
+        assert rows[0]["status"] == "PRIVATE"
+        assert calls == [("runs", ["ERR1"], CREDS.username)]
+
+    def test_full_fields_looks_up_both_accession_forms(self, fake_client, monkeypatch):
+        seen: list[list[str]] = []
+        monkeypatch.setattr(
+            records.portal,
+            "fields_for_accessions",
+            lambda entity, accessions, **_kw: seen.append(list(accessions)) or {"PRJEB1": {"study_title": "Alpha"}},
+        )
+        fake_client._rows = [FakeRow(accession="ERP1", secondary_accession="PRJEB1")]
+        rows = records.list_records(CREDS, "studies", test=False, full_fields=True)
+        assert rows[0]["study_title"] == "Alpha"
+        assert seen == [["ERP1", "PRJEB1"]]
+
+    def test_full_fields_is_skipped_on_the_test_environment(self, fake_client, monkeypatch):
+        called = []
+        monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: called.append(a) or {})
+        fake_client._rows = [FakeRow(accession="ERR1")]
+        records.list_records(CREDS, "runs", test=True, full_fields=True)
+        assert called == []
+
+    def test_a_failing_portal_still_returns_the_listing(self, fake_client, monkeypatch):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("portal down")
+
+        monkeypatch.setattr(records.portal, "fields_for_accessions", boom)
+        fake_client._rows = [FakeRow(accession="ERR1", status="PRIVATE")]
+        rows = records.list_records(CREDS, "runs", test=False, full_fields=True)
+        assert [r["accession"] for r in rows] == ["ERR1"]
+
     def test_files_are_never_status_filtered(self, fake_client):
         fake_client._rows = [FakeRow(filename="f.fastq.gz")]
         assert len(records.list_records(CREDS, "files", test=True, status="PRIVATE")) == 1

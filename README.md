@@ -52,6 +52,19 @@ makes an ENA request at all.
   `find_runs_by_experiment_alias`.
   Credentials are passed per call as `records.Credentials`, so a multi-user server never needs
   process-wide state.
+- `ena_submission_toolkit.portal` — the half of ENA a Webin account cannot see. The Reports API
+  is scoped by *ownership*, not by release status: it lists this account's records, private and
+  public alike, and nothing anybody else submitted. The ENA Portal API is keyed by accession
+  instead, so this module reaches any record — `search_public("runs", "PRJEB1787")` for a study's
+  public runs, whoever submitted them — and also fills out the account's own rows with every field
+  ENA indexes (`fields_for_accessions`, ~200 fields for a run against the Reports API's five;
+  `list_records(..., full_fields=True)` is the same thing wired into a listing). Transport is
+  [`ena-api-handler`](https://github.com/EBI-Metagenomics/ena-api-handler) rather than
+  `ena-api-client`, which owns the Webin account APIs; what lives here is the behaviour on top —
+  which Portal result answers for which entity, turning an accession into a query (including
+  translating `ERP…` into `PRJEB…` when the result being searched can only match the latter), and
+  merging Portal rows into report rows. Production only: there is no Portal API on `wwwdev`.
+  Credentials are optional and only widen what is visible.
 - `ena_submission_toolkit.prepare_dh_output` — rename a DataHarmonizer export's fields to their
   LinkML `annotations.id` values (`prepare_data` for in-memory data, `prepare` for files).
 
