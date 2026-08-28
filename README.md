@@ -13,8 +13,16 @@ A schema-driven layer above two smaller libraries:
 
 `ena-submission-toolkit` sits between them: XML manifest building, ENA-checklist unit handling
 (parsing/converting/validating values against a schema's allowed units), duplicate-alias detection
-for idempotent re-submission, XSD validation, and renaming a DataHarmonizer export's fields from
-human-readable titles to their LinkML `annotations.id` values.
+for idempotent re-submission, XSD validation, renaming a DataHarmonizer export's fields from
+human-readable titles to their LinkML `annotations.id` values, and browsing/editing the records
+already held under a Webin account.
+
+Every application in this ecosystem talks to ENA **through here** (or through `ena-api-client`
+directly) and nowhere else — [`ena-browser-ui`](https://github.com/timrozday-mgnify/ena-browser-ui)
+and [`mimicc-ena-submission-assistant`](https://github.com/timrozday-mgnify/mimicc-ena-submission-assistant)
+are HTTP/UI shells over `ena_submission_toolkit.records`, and the
+[`ena-browser`](https://github.com/timrozday-mgnify/ena-browser) element is a pure view that never
+makes an ENA request at all.
 
 ## Modules
 
@@ -25,6 +33,25 @@ human-readable titles to their LinkML `annotations.id` values.
 - `ena_submission_toolkit.submit_study` — build/validate/submit ENA study (project) XML.
 - `ena_submission_toolkit.submit_sample` — build/validate/submit ENA sample XML, with optional
   schema-driven unit normalisation via `submit_batch(..., unit_rules=...)`.
+- `ena_submission_toolkit.records` — browse and change what a Webin account already holds:
+  `list_records` (Reports API rows as plain dicts, optionally filtered by release status, by
+  free-text `search`, or by submission lineage — `linked_to="PRJEB123"` for the samples in a
+  study, `unlinked=True` for the samples no experiment or read points at. The Reports API
+  itself takes only `max-results` and a status, so everything beyond that is joined and
+  filtered here, from the experiment/run/analysis rows; run rows also carry
+  `process_status`/`process_date`/`process_error` from the run-processing report, which is how a
+  submitter sees whether ENA has finished archiving the read files as opposed to merely registering
+  the run), `editable_columns`, `read_editable_fields` (the current value of the editable fields
+  that only exist in the record XML — a run's title, an experiment's library and instrument — read
+  in batches, so a grid can show them before anyone edits them),
+  `modify_records` (fetch the record's current XML, patch the edited fields, resubmit as a MODIFY —
+  never rebuilt from a report row, which would drop everything ENA holds but does not report),
+  `preview_modify_records` (the same manifests, returned instead of sent, so a caller can show
+  exactly what a MODIFY would do before committing to it — `modify_records` echoes the document it
+  submitted, so the two can be compared), `record_action` (release/hold/suppress/cancel/kill) and
+  `find_runs_by_experiment_alias`.
+  Credentials are passed per call as `records.Credentials`, so a multi-user server never needs
+  process-wide state.
 - `ena_submission_toolkit.prepare_dh_output` — rename a DataHarmonizer export's fields to their
   LinkML `annotations.id` values (`prepare_data` for in-memory data, `prepare` for files).
 
