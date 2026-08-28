@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ena-submission-toolkit"
-version = "0.1.0"
+version = "0.1.2"
 description = "Build and submit ENA records (studies, samples) from structured/DataHarmonizer-exported data."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
-    "ena-api-client @ git+https://github.com/timrozday-mgnify/ena-api-client.git@v0.1.1",
+    "ena-api-client @ git+https://github.com/timrozday-mgnify/ena-api-client.git@v0.1.2",
     "linkml-lib @ git+https://github.com/timrozday-mgnify/linkml-lib.git@v0.1.0",
     "httpx>=0.27",
     "lxml>=5.0",
