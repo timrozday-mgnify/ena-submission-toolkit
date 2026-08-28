@@ -21,6 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "ena-api-client @ git+https://github.com/timrozday-mgnify/ena-api-client.git@v0.1.2",
+    "ena-api-handler @ git+https://github.com/EBI-Metagenomics/ena-api-handler.git@v3.0.0",
     "linkml-lib @ git+https://github.com/timrozday-mgnify/linkml-lib.git@v0.1.0",
     "httpx>=0.27",
     "lxml>=5.0",

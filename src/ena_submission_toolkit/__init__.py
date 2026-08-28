@@ -1,7 +1,8 @@
 """Build and submit ENA records (studies, samples) from structured data.
 
-A schema-driven layer above ``ena-api-client`` (transport) and ``linkml-lib``
-(schema introspection): XML manifest building, ENA-checklist unit handling,
+A schema-driven layer above ``ena-api-client`` (Webin transport),
+``ena-api-handler`` (ENA Portal transport) and ``linkml-lib`` (schema
+introspection): XML manifest building, ENA-checklist unit handling,
 duplicate-alias detection, and DataHarmonizer export field renaming.
 
 Modules:
@@ -13,6 +14,9 @@ Modules:
     records             -- browse and change the records held under a Webin
                             account: list, MODIFY a field, run lifecycle
                             actions.
+    portal              -- the public half of ENA, via the Portal API: search
+                            records this account does not own, and fill out
+                            the ones it does with every field ENA indexes.
     prepare_dh_output    -- rename a DataHarmonizer export's fields to their
                             LinkML annotations.id values.
 """

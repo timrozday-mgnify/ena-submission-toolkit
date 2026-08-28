@@ -15,6 +15,7 @@ or writes the environment or the disk — for env-var credentials use
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,7 +24,10 @@ from typing import Any, Final
 from ena_api import WebinClient, WebinConfig, is_accession
 from lxml import etree
 
+from . import portal
 from .common import validate_hold_until
+
+logger = logging.getLogger(__name__)
 
 #: Every entity the Reports API exposes, in the order a UI usually shows them.
 ENTITIES: Final = ("studies", "samples", "runs", "experiments", "analyses", "files")
@@ -155,6 +159,7 @@ def list_records(
     search: str = "",
     linked_to: str = "",
     unlinked: bool = False,
+    full_fields: bool = False,
     max_results: int = DEFAULT_MAX_RESULTS,
 ) -> list[dict[str, Any]]:
     """List the account's records for one entity, as plain dicts.
@@ -190,6 +195,17 @@ def list_records(
     ``linked_to`` and ``unlinked`` cost three extra report requests (the
     experiment/run/analysis rows the lineage is built from); ``search`` and
     ``status`` cost nothing.
+
+    ``full_fields``
+        Also fill each row out from the ENA Portal API — around 200 fields for
+        a run (instrument, library strategy, collection date, the archived
+        files' FTP paths) against the Reports API's five. See
+        :mod:`ena_submission_toolkit.portal`. Costs one request per 50 records
+        and is best-effort: report fields always win a collision, and a record
+        the Portal cannot answer for simply keeps them.
+
+    This lists what *this account* owns, public and private alike. For records
+    it does not own, see :func:`ena_submission_toolkit.portal.search_public`.
     """
     method = REPORT_METHODS.get(entity)
     if method is None:
@@ -209,9 +225,43 @@ def list_records(
             index = _link_index(client, max_results)
             related = _expand(index, linked_to) if linked_to else set()
             rows = [row for row in rows if _keep_by_link(row, index, related, unlinked=unlinked)]
+    if full_fields and rows and not test:
+        # No Portal API on wwwdev, and a test submission is not in the
+        # production index either — asking would be a slow way to learn nothing.
+        _merge_portal_fields(creds, entity, rows)
     if search:
         rows = _filter_by_search(rows, search)
     return rows if entity == "files" else _filter_by_status(rows, status)
+
+
+def _merge_portal_fields(creds: Credentials, entity: str, rows: list[dict[str, Any]]) -> None:
+    """Merge the Portal API's full field set into ``rows``, in place.
+
+    Best-effort: a Portal that is unreachable, unauthorised, or has simply
+    never heard of these accessions leaves the rows as they were. The listing
+    is the point; the extra columns are a bonus.
+    """
+    # A report row carries one accession form or the other, and which one is
+    # not consistent between entities — ask about both, look up by both.
+    keys = ("accession", "secondary_accession")
+    accessions = [row[key] for row in rows for key in keys if isinstance(row.get(key), str) and row[key]]
+    try:
+        indexed = portal.fields_for_accessions(
+            entity, accessions, username=creds.username, password=creds.password
+        )
+    except Exception:  # noqa: BLE001 - enrichment must never lose the listing
+        logger.warning("Could not read full fields from the ENA Portal API; showing report fields only")
+        return
+    for row in rows:
+        for key in keys:
+            extra = indexed.get(row.get(key) or "")
+            if extra is None:
+                continue
+            # Report fields win: they are what modify_records and the lifecycle
+            # actions key off, and the Portal's copy can lag a recent change.
+            for name, value in extra.items():
+                row.setdefault(name, value)
+            break
 
 
 def _run_processing(client: WebinClient, max_results: int) -> dict[str, dict[str, Any]]:
