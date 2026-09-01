@@ -193,6 +193,27 @@ class TestListRecords:
         # Report fields still win a collision.
         assert rows[0]["title"] == "Report title" and rows[0]["status"] == "PRIVATE"
 
+    def test_an_attribute_whose_tag_is_already_a_column_keeps_its_own(self, fake_client, monkeypatch):
+        """A checklist can tag an attribute anything, including a name already
+        taken — merged flat, whichever lost would vanish without a trace."""
+        monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
+        fake_client._xml = b"""<?xml version="1.0"?>
+        <SAMPLE_SET><SAMPLE alias="s1" accession="ERS9000001">
+          <TITLE>Report title</TITLE>
+          <SAMPLE_ATTRIBUTES>
+            <SAMPLE_ATTRIBUTE><TAG>title</TAG><VALUE>What the checklist calls it</VALUE></SAMPLE_ATTRIBUTE>
+            <SAMPLE_ATTRIBUTE><TAG>host</TAG><VALUE>Homo sapiens</VALUE></SAMPLE_ATTRIBUTE>
+          </SAMPLE_ATTRIBUTES>
+        </SAMPLE></SAMPLE_SET>"""
+        fake_client._rows = [FakeRow(accession="ERS9000001", title="Report title", status="PRIVATE")]
+
+        row = records.list_records(CREDS, "samples", test=True, full_fields=True)[0]
+
+        assert row["title"] == "Report title"                      # the report still wins
+        assert row["attr:title"] == "What the checklist calls it"   # and the attribute survives
+        assert row["host"] == "Homo sapiens"                        # an uncontested tag is untouched
+        assert "attr:host" not in row
+
     def test_full_fields_matches_the_xml_on_either_accession_form(self, fake_client, monkeypatch):
         monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
         fake_client._xml = b"""<?xml version="1.0"?>
