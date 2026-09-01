@@ -150,7 +150,7 @@ class TestListRecords:
         assert rows[0]["study_title"] == "Alpha"
         assert seen == [["ERP1", "PRJEB1"]]
 
-    def test_full_fields_is_skipped_on_the_test_environment(self, fake_client, monkeypatch):
+    def test_the_portal_is_skipped_on_the_test_environment(self, fake_client, monkeypatch):
         called = []
         monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: called.append(a) or {})
         fake_client._rows = [FakeRow(accession="ERR1")]
@@ -165,6 +165,57 @@ class TestListRecords:
         fake_client._rows = [FakeRow(accession="ERR1", status="PRIVATE")]
         rows = records.list_records(CREDS, "runs", test=False, full_fields=True)
         assert [r["accession"] for r in rows] == ["ERR1"]
+
+    def test_full_fields_merges_the_record_xml(self, fake_client, monkeypatch):
+        """The Browser API answers where the Portal cannot: the test
+        environment, and a checklist attribute nothing indexes."""
+        monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
+        fake_client._xml = b"""<?xml version="1.0"?>
+        <SAMPLE_SET><SAMPLE alias="s1" accession="ERS9000001">
+          <IDENTIFIERS><PRIMARY_ID>ERS9000001</PRIMARY_ID><EXTERNAL_ID>SAMEA1</EXTERNAL_ID></IDENTIFIERS>
+          <TITLE>Report title</TITLE>
+          <SAMPLE_NAME><TAXON_ID>410658</TAXON_ID><SCIENTIFIC_NAME>soil metagenome</SCIENTIFIC_NAME></SAMPLE_NAME>
+          <SAMPLE_ATTRIBUTES>
+            <SAMPLE_ATTRIBUTE><TAG>collection date</TAG><VALUE>2024-05-01</VALUE></SAMPLE_ATTRIBUTE>
+            <SAMPLE_ATTRIBUTE><TAG>depth</TAG><VALUE>30</VALUE><UNITS>cm</UNITS></SAMPLE_ATTRIBUTE>
+          </SAMPLE_ATTRIBUTES>
+        </SAMPLE></SAMPLE_SET>"""
+        fake_client._rows = [FakeRow(accession="ERS9000001", title="Report title", status="PRIVATE")]
+
+        rows = records.list_records(CREDS, "samples", test=True, full_fields=True)
+
+        assert rows[0]["collection date"] == "2024-05-01"
+        assert rows[0]["depth"] == "30 cm"  # the units belong with the value
+        assert rows[0]["taxon_id"] == "410658"
+        assert rows[0]["scientific_name"] == "soil metagenome"
+        # An attribute's own <TAG>/<VALUE> leaves are not fields in their own right.
+        assert "tag" not in rows[0] and "value" not in rows[0]
+        # Report fields still win a collision.
+        assert rows[0]["title"] == "Report title" and rows[0]["status"] == "PRIVATE"
+
+    def test_full_fields_matches_the_xml_on_either_accession_form(self, fake_client, monkeypatch):
+        monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
+        fake_client._xml = b"""<?xml version="1.0"?>
+        <PROJECT_SET><PROJECT alias="p1" accession="PRJEB1">
+          <IDENTIFIERS><PRIMARY_ID>PRJEB1</PRIMARY_ID><SECONDARY_ID>ERP1</SECONDARY_ID></IDENTIFIERS>
+          <DESCRIPTION>What this study is</DESCRIPTION>
+        </PROJECT></PROJECT_SET>"""
+        fake_client._rows = [FakeRow(accession="ERP1")]  # the report led with the other form
+        rows = records.list_records(CREDS, "studies", test=True, full_fields=True)
+        assert rows[0]["description"] == "What this study is"
+
+    def test_a_failing_browser_still_returns_the_listing(self, fake_client, monkeypatch):
+        monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
+        fake_client._xml = RuntimeError("browser down")
+        fake_client._rows = [FakeRow(accession="ERS1", status="PRIVATE")]
+        rows = records.list_records(CREDS, "samples", test=True, full_fields=True)
+        assert [r["accession"] for r in rows] == ["ERS1"]
+
+    def test_full_fields_batches_the_browser_requests(self, fake_client, monkeypatch):
+        monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
+        fake_client._rows = [FakeRow(accession=f"ERS{i}") for i in range(250)]
+        records.list_records(CREDS, "samples", test=True, full_fields=True)
+        assert [len(batch) for batch in fake_client.batches] == [100, 100, 50]
 
     def test_files_are_never_status_filtered(self, fake_client):
         fake_client._rows = [FakeRow(filename="f.fastq.gz")]

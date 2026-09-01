@@ -198,12 +198,21 @@ def list_records(
     ``status`` cost nothing.
 
     ``full_fields``
-        Also fill each row out from the ENA Portal API — around 200 fields for
-        a run (instrument, library strategy, collection date, the archived
-        files' FTP paths) against the Reports API's five. See
-        :mod:`ena_submission_toolkit.portal`. Costs one request per 50 records
-        and is best-effort: report fields always win a collision, and a record
-        the Portal cannot answer for simply keeps them.
+        Also fill each row out from the two sources that hold more than the
+        five columns a report row carries:
+
+        * the record's own XML, from the Browser API — every checklist
+          attribute as submitted, plus the structural fields (taxon, library,
+          instrument) the reports omit. Private records included: the account's
+          own credentials are what make them readable. Works in both
+          environments. One request per 100 records.
+        * the ENA Portal API — around 200 indexed fields for a run, including
+          ones nobody submitted (the archived files' FTP paths, read counts).
+          Production only, since nothing in the test environment is indexed.
+          One request per 50 records. See :mod:`ena_submission_toolkit.portal`.
+
+        Both are best-effort: report fields always win a collision, and a
+        record neither source can answer for simply keeps them.
 
     This lists what *this account* owns, public and private alike. For records
     it does not own, see :func:`ena_submission_toolkit.portal.search_public`.
@@ -226,10 +235,15 @@ def list_records(
             index = _link_index(client, max_results)
             related = _expand(index, linked_to) if linked_to else set()
             rows = [row for row in rows if _keep_by_link(row, index, related, unlinked=unlinked)]
-    if full_fields and rows and not test:
-        # No Portal API on wwwdev, and a test submission is not in the
-        # production index either — asking would be a slow way to learn nothing.
-        _merge_portal_fields(creds, entity, rows)
+    if full_fields and rows:
+        # The record's own XML first: it is what the submitter actually sent,
+        # and it is the only one of the two sources that answers at all in the
+        # test environment.
+        _merge_xml_fields(creds, entity, rows, test=test)
+        if not test:
+            # No Portal API on wwwdev, and a test submission is not in the
+            # production index either — asking would be a slow way to learn nothing.
+            _merge_portal_fields(creds, entity, rows)
     if search:
         rows = _filter_by_search(rows, search)
     return rows if entity == "files" else _filter_by_status(rows, status)
@@ -260,6 +274,103 @@ def _merge_portal_fields(creds: Credentials, entity: str, rows: list[dict[str, A
                 continue
             # Report fields win: they are what modify_records and the lifecycle
             # actions key off, and the Portal's copy can lag a recent change.
+            for name, value in extra.items():
+                row.setdefault(name, value)
+            break
+
+
+def _xml_fields(record: etree._Element) -> dict[str, str]:
+    """Everything one record's XML carries, flattened onto one dict.
+
+    Two kinds of thing live in there and both are wanted:
+
+    * the checklist attributes the submitter filled in
+      (``<SAMPLE_ATTRIBUTE><TAG>host sex</TAG><VALUE>female</VALUE>``), keyed
+      by their tag exactly as submitted — that is the vocabulary the checklist
+      and the submission spreadsheet use, so it is what a user recognises;
+    * the structural leaves (``TAXON_ID``, ``SCIENTIFIC_NAME``,
+      ``LIBRARY_STRATEGY``, ...), keyed by their lowercased tag, to match the
+      snake_case the report and Portal rows already use.
+
+    A name that appears twice keeps its first value: ENA nests the same leaf
+    tag at more than one depth (an ``EXTERNAL_ID`` under the record, another
+    under a link), and the record's own comes first.
+    """
+    fields: dict[str, str] = {}
+    for element in record.iter():
+        tag = element.tag
+        if not isinstance(tag, str):  # comments, processing instructions
+            continue
+        if tag.endswith("_ATTRIBUTE"):
+            name = (element.findtext("TAG") or "").strip()
+            value = (element.findtext("VALUE") or "").strip()
+            units = (element.findtext("UNITS") or "").strip()
+            if name:
+                fields.setdefault(name, f"{value} {units}".strip())
+            continue
+        parent = element.getparent()
+        if parent is not None and isinstance(parent.tag, str) and parent.tag.endswith("_ATTRIBUTE"):
+            continue  # an attribute's own TAG/VALUE/UNITS, already taken above
+        if len(element) == 0 and (element.text or "").strip():
+            fields.setdefault(tag.lower(), element.text.strip())
+    return fields
+
+
+def _xml_identifiers(record: etree._Element) -> set[str]:
+    """Every accession a record's XML answers to.
+
+    The report row carries one accession form and the XML leads with another
+    (a study is ``PRJEB…`` in one and ``ERP…`` in the other), so a record is
+    indexed under all of them and looked up by all of them.
+    """
+    ids = {record.get("accession") or ""}
+    for identifier in record.findall("IDENTIFIERS/*"):
+        ids.add((identifier.text or "").strip())
+    return ids - {""}
+
+
+def _merge_xml_fields(creds: Credentials, entity: str, rows: list[dict[str, Any]], *, test: bool) -> None:
+    """Merge each record's own submitted XML into ``rows``, in place.
+
+    What the Portal cannot answer for — anything in the test environment,
+    anything not yet indexed — the Browser API still holds: the record as
+    submitted, checklist attributes and all, and readable while it is still
+    private because the account's credentials go with the request.
+
+    Best-effort, like :func:`_merge_portal_fields`: the listing is the point
+    and the extra columns are a bonus, so a batch ENA will not answer for
+    leaves those rows as they were.
+    """
+    if entity not in _XML_TAGS:
+        return  # a file is not a record with an XML document of its own
+    _, record_tag = _XML_TAGS[entity]
+    wanted = [a for a in dict.fromkeys(i for row in rows for i in sorted(_row_ids(row))) if is_accession(a)]
+    if not wanted:
+        return
+
+    indexed: dict[str, dict[str, str]] = {}
+    try:
+        with webin_client(creds, test) as client:
+            for start in range(0, len(wanted), _XML_BATCH):
+                try:
+                    payload = client.browser.xml_many(wanted[start : start + _XML_BATCH])
+                except LookupError:
+                    continue  # ENA holds none of this batch; the others still matter
+                for record in etree.fromstring(payload).iter(record_tag):
+                    fields = _xml_fields(record)
+                    for accession in _xml_identifiers(record):
+                        indexed[accession] = fields
+    except Exception:  # noqa: BLE001 - enrichment must never lose the listing
+        logger.warning("Could not read record XML from the ENA Browser API; showing report fields only")
+        return
+
+    for row in rows:
+        for accession in sorted(_row_ids(row)):
+            extra = indexed.get(accession)
+            if extra is None:
+                continue
+            # Report fields win: they are what modify_records and the lifecycle
+            # actions key off.
             for name, value in extra.items():
                 row.setdefault(name, value)
             break
