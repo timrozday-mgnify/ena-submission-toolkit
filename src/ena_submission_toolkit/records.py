@@ -91,6 +91,25 @@ _EDITABLE: Final[dict[str, dict[str, tuple[str, str]]]] = {
     "files": {},
 }
 
+# Entity -> where its record XML keeps the free-form TAG/VALUE attribute list.
+# This is where a checklist's fields live — a sample's collection date, host,
+# isolation source — and neither the Reports API nor the Portal API returns
+# them: the Reports API has five columns per record, and the Portal only
+# indexes its own fixed field set (102 for a sample), so anything the
+# checklist calls something else is nowhere but here.
+_ATTRIBUTE_PATHS: Final[dict[str, str]] = {
+    "studies": "PROJECT_ATTRIBUTES/PROJECT_ATTRIBUTE",
+    "samples": "SAMPLE_ATTRIBUTES/SAMPLE_ATTRIBUTE",
+    "experiments": "EXPERIMENT_ATTRIBUTES/EXPERIMENT_ATTRIBUTE",
+    "runs": "RUN_ATTRIBUTES/RUN_ATTRIBUTE",
+    "analyses": "ANALYSIS_ATTRIBUTES/ANALYSIS_ATTRIBUTE",
+}
+
+#: Attribute columns are namespaced, so a checklist tag can never collide with
+#: a report or Portal column (both carry a plain ``description``, say) and so a
+#: grid can group them.
+ATTRIBUTE_PREFIX: Final = "attr:"
+
 #: How many accessions to ask the Browser API for in one request.
 _XML_BATCH: Final = 100
 
@@ -482,6 +501,61 @@ def _read_field(record: etree._Element, kind: str, name: str) -> str | None:
     return record.get(name) if kind == "attr" else record.findtext(name)
 
 
+def _read_attributes(record: etree._Element, path: str) -> dict[str, Any]:
+    """A record's TAG/VALUE attribute list, as ``{"attr:<tag>": value}``.
+
+    A repeated tag keeps its last value: the alternative is a list in a cell,
+    and a grid column holds one value. Rare enough in practice (ENA's own
+    duplicated ENA-FIRST-PUBLIC aside) to not be worth a shape everything
+    downstream would have to handle.
+    """
+    values: dict[str, Any] = {}
+    for attribute in record.findall(path):
+        tag = (attribute.findtext("TAG") or "").strip()
+        if not tag:
+            continue
+        value = (attribute.findtext("VALUE") or "").strip()
+        units = (attribute.findtext("UNITS") or "").strip()
+        # ponytail: the unit joined onto the value, not a column of its own.
+        # It is here to be read; a caller that needs to compute on it wants
+        # common.normalise_unit_value and the record XML, not a grid cell.
+        values[ATTRIBUTE_PREFIX + tag] = f"{value} {units}".strip() if units else value
+    return values
+
+
+def read_xml_fields(
+    creds: Credentials,
+    entity: str,
+    accessions: list[str],
+    *,
+    test: bool,
+    attributes: bool = True,
+) -> dict[str, dict[str, Any]]:
+    """Everything a record holds that only its XML knows, per accession.
+
+    Two kinds of field, from one fetch:
+
+    * the editable ones (:func:`editable_columns`) — a run's title, an
+      experiment's library and instrument;
+    * with ``attributes=True``, the record's whole TAG/VALUE attribute list,
+      one column per tag under the :data:`ATTRIBUTE_PREFIX` namespace. This is
+      where a checklist's fields are — ``attr:collection date``,
+      ``attr:host scientific name`` — and the two listing APIs have neither:
+      the Reports API returns five columns, and the Portal API only indexes
+      its own fixed set, so a tag outside that set exists nowhere else.
+
+    Attribute columns are **not** editable — they are absent from
+    :func:`editable_columns`, and :func:`modify_records` refuses them. ENA has
+    no objection to a MODIFY changing them; this module's patcher addresses a
+    field by a fixed path per entity, and an attribute is addressed by its
+    tag's *text* within a repeated list that differs per record.
+
+    Returns ``{accession: {field: value}}``, omitting records ENA does not
+    hold and fields the record's XML does not carry.
+    """
+    return _read_fields(creds, entity, accessions, test=test, attributes=attributes)
+
+
 def read_editable_fields(
     creds: Credentials,
     entity: str,
@@ -501,10 +575,24 @@ def read_editable_fields(
     Returns ``{accession: {field: value}}``, omitting records ENA does not
     hold and fields the record's XML does not carry. Fields are exactly
     :func:`editable_columns` for the entity — an entity with none (files)
-    costs no request at all.
+    costs no request at all. For the record's checklist attributes as well,
+    from the same fetch, see :func:`read_xml_fields`.
     """
-    mapping = _EDITABLE.get(entity)
-    if entity not in _XML_TAGS or not mapping:
+    return _read_fields(creds, entity, accessions, test=test, attributes=False)
+
+
+def _read_fields(
+    creds: Credentials,
+    entity: str,
+    accessions: list[str],
+    *,
+    test: bool,
+    attributes: bool,
+) -> dict[str, dict[str, Any]]:
+    """Fetch the record XML in batches and pull the wanted fields out of it."""
+    mapping = _EDITABLE.get(entity, {})
+    attribute_path = _ATTRIBUTE_PATHS.get(entity, "") if attributes else ""
+    if entity not in _XML_TAGS or not (mapping or attribute_path):
         return {}
     wanted = [a for a in dict.fromkeys(accessions) if is_accession(a)]
     if not wanted:
@@ -528,6 +616,8 @@ def read_editable_fields(
                     value = _read_field(record, kind, name)
                     if value is not None:
                         values[field] = value
+                if attribute_path:
+                    values.update(_read_attributes(record, attribute_path))
                 found[accession] = values
     return found
 

@@ -515,6 +515,49 @@ class TestUndoChanges:
         assert records.undo_changes(done) == []
 
 
+class TestReadXmlFields:
+    ATTRIBUTE_XML = b"""<?xml version="1.0"?>
+<SAMPLE_SET><SAMPLE alias="old-alias" accession="ERS9000001">
+  <TITLE>Old title</TITLE>
+  <SAMPLE_ATTRIBUTES>
+    <SAMPLE_ATTRIBUTE><TAG>collection date</TAG><VALUE>2021-03-01</VALUE></SAMPLE_ATTRIBUTE>
+    <SAMPLE_ATTRIBUTE><TAG>depth</TAG><VALUE>10</VALUE><UNITS>m</UNITS></SAMPLE_ATTRIBUTE>
+    <SAMPLE_ATTRIBUTE><TAG>ENA-CHECKLIST</TAG><VALUE>ERC000011</VALUE></SAMPLE_ATTRIBUTE>
+    <SAMPLE_ATTRIBUTE><VALUE>no tag, no column</VALUE></SAMPLE_ATTRIBUTE>
+  </SAMPLE_ATTRIBUTES>
+</SAMPLE></SAMPLE_SET>"""
+
+    def test_reads_the_checklist_attributes_alongside_the_editable_fields(self, fake_client):
+        fake_client._xml = self.ATTRIBUTE_XML
+        assert records.read_xml_fields(CREDS, "samples", ["ERS9000001"], test=True)["ERS9000001"] == {
+            "alias": "old-alias",
+            "title": "Old title",
+            "attr:collection date": "2021-03-01",
+            "attr:depth": "10 m",             # the unit is joined onto the value
+            "attr:ENA-CHECKLIST": "ERC000011",
+        }
+
+    def test_read_editable_fields_still_returns_only_the_editable_ones(self, fake_client):
+        fake_client._xml = self.ATTRIBUTE_XML
+        fields = records.read_editable_fields(CREDS, "samples", ["ERS9000001"], test=True)
+        assert fields["ERS9000001"] == {"alias": "old-alias", "title": "Old title"}
+        # One fetch's worth of work either way: the attributes are a parse, not a request.
+        assert len(fake_client.batches) == 1
+
+    def test_attributes_are_not_editable(self, fake_client):
+        fake_client._xml = self.ATTRIBUTE_XML
+        assert "attr:collection date" not in records.editable_columns("samples")
+        result = records.modify_records(
+            CREDS,
+            "samples",
+            [{"accession": "ERS9000001", "changes": {"attr:collection date": "2022-01-01"}}],
+            test=True,
+        )
+        assert result["success"] is False
+        assert "not editable" in result["results"][0]["messages"][0]
+        assert fake_client.submitted == []
+
+
 class TestRecordAction:
     def test_runs_the_action(self, fake_client):
         result = records.record_action(CREDS, "ERS9000001", "release", test=True)
