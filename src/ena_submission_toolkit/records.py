@@ -91,6 +91,11 @@ _EDITABLE: Final[dict[str, dict[str, tuple[str, str]]]] = {
     "files": {},
 }
 
+#: Namespace for a checklist attribute whose tag is already a column of the
+#: row it is being merged into. Not a prefix on every attribute: a tag is the
+#: vocabulary the submitter used, and most of them collide with nothing.
+ATTRIBUTE_PREFIX: Final = "attr:"
+
 #: How many accessions to ask the Browser API for in one request.
 _XML_BATCH: Final = 100
 
@@ -279,24 +284,29 @@ def _merge_portal_fields(creds: Credentials, entity: str, rows: list[dict[str, A
             break
 
 
-def _xml_fields(record: etree._Element) -> dict[str, str]:
-    """Everything one record's XML carries, flattened onto one dict.
+def _xml_fields(record: etree._Element) -> tuple[dict[str, str], dict[str, str]]:
+    """Everything one record's XML carries: ``(structural leaves, attributes)``.
 
     Two kinds of thing live in there and both are wanted:
 
+    * the structural leaves (``TAXON_ID``, ``SCIENTIFIC_NAME``,
+      ``LIBRARY_STRATEGY``, ...), keyed by their lowercased tag, to match the
+      snake_case the report and Portal rows already use;
     * the checklist attributes the submitter filled in
       (``<SAMPLE_ATTRIBUTE><TAG>host sex</TAG><VALUE>female</VALUE>``), keyed
       by their tag exactly as submitted — that is the vocabulary the checklist
-      and the submission spreadsheet use, so it is what a user recognises;
-    * the structural leaves (``TAXON_ID``, ``SCIENTIFIC_NAME``,
-      ``LIBRARY_STRATEGY``, ...), keyed by their lowercased tag, to match the
-      snake_case the report and Portal rows already use.
+      and the submission spreadsheet use, so it is what a user recognises.
 
-    A name that appears twice keeps its first value: ENA nests the same leaf
-    tag at more than one depth (an ``EXTERNAL_ID`` under the record, another
-    under a link), and the record's own comes first.
+    Kept apart because a checklist may call an attribute anything at all,
+    including a name the record or the report already uses — see
+    :func:`_merge_xml_fields`, which is where the two are reconciled.
+
+    Within each kind, a name that appears twice keeps its first value: ENA
+    nests the same leaf tag at more than one depth (an ``EXTERNAL_ID`` under
+    the record, another under a link), and the record's own comes first.
     """
-    fields: dict[str, str] = {}
+    leaves: dict[str, str] = {}
+    attributes: dict[str, str] = {}
     for element in record.iter():
         tag = element.tag
         if not isinstance(tag, str):  # comments, processing instructions
@@ -306,14 +316,14 @@ def _xml_fields(record: etree._Element) -> dict[str, str]:
             value = (element.findtext("VALUE") or "").strip()
             units = (element.findtext("UNITS") or "").strip()
             if name:
-                fields.setdefault(name, f"{value} {units}".strip())
+                attributes.setdefault(name, f"{value} {units}".strip())
             continue
         parent = element.getparent()
         if parent is not None and isinstance(parent.tag, str) and parent.tag.endswith("_ATTRIBUTE"):
             continue  # an attribute's own TAG/VALUE/UNITS, already taken above
         if len(element) == 0 and (element.text or "").strip():
-            fields.setdefault(tag.lower(), element.text.strip())
-    return fields
+            leaves.setdefault(tag.lower(), element.text.strip())
+    return leaves, attributes
 
 
 def _xml_identifiers(record: etree._Element) -> set[str]:
@@ -348,7 +358,7 @@ def _merge_xml_fields(creds: Credentials, entity: str, rows: list[dict[str, Any]
     if not wanted:
         return
 
-    indexed: dict[str, dict[str, str]] = {}
+    indexed: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
     try:
         with webin_client(creds, test) as client:
             for start in range(0, len(wanted), _XML_BATCH):
@@ -366,13 +376,23 @@ def _merge_xml_fields(creds: Credentials, entity: str, rows: list[dict[str, Any]
 
     for row in rows:
         for accession in sorted(_row_ids(row)):
-            extra = indexed.get(accession)
-            if extra is None:
+            found = indexed.get(accession)
+            if found is None:
                 continue
+            leaves, attributes = found
             # Report fields win: they are what modify_records and the lifecycle
             # actions key off.
-            for name, value in extra.items():
+            for name, value in leaves.items():
                 row.setdefault(name, value)
+            # A checklist may tag an attribute anything, including a name the
+            # report or the record structure already uses — ENA's own sample
+            # checklists have a "description", and so does every report row.
+            # Merging it flat would silently drop whichever lost, so a taken
+            # name sends the attribute to its own namespace instead. Which
+            # name it gets is the same for every row of a listing: the keys it
+            # collides with come from the report model, not from the record.
+            for tag, value in attributes.items():
+                row.setdefault(tag if tag not in row else ATTRIBUTE_PREFIX + tag, value)
             break
 
 

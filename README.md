@@ -63,7 +63,9 @@ makes an ENA request at all.
   ENA indexes (`fields_for_accessions`, ~200 fields for a run against the Reports API's five;
   `list_records(..., full_fields=True)` merges it into a listing, alongside the record's own
   submitted XML — every checklist attribute, from the Browser API, which is the only one of the
-  two that answers in the test environment). Transport is
+  two that answers in the test environment. An attribute keeps its tag as the column name unless
+  the row already has a column of that name, in which case it moves to `attr:<tag>` rather than
+  losing to it). Transport is
   [`ena-api-handler`](https://github.com/EBI-Metagenomics/ena-api-handler) rather than
   `ena-api-client`, which owns the Webin account APIs; what lives here is the behaviour on top —
   which Portal result answers for which entity, turning an accession into a query (including
