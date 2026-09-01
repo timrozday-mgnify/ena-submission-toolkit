@@ -45,7 +45,11 @@ makes an ENA request at all.
   that only exist in the record XML — a run's title, an experiment's library and instrument — read
   in batches, so a grid can show them before anyone edits them),
   `modify_records` (fetch the record's current XML, patch the edited fields, resubmit as a MODIFY —
-  never rebuilt from a report row, which would drop everything ENA holds but does not report),
+  never rebuilt from a report row, which would drop everything ENA holds but does not report. A
+  field is one of `editable_columns` or a checklist attribute the record already carries, addressed
+  by its tag as `attr:<tag>`; ENA's own `ENA-*` tags are refused, and so is a tag the record does
+  not have, since adding one means knowing where it may legally sit and whether the record's
+  checklist knows it),
   `preview_modify_records` (the same manifests, returned instead of sent, so a caller can show
   exactly what a MODIFY would do before committing to it — `modify_records` echoes the document it
   submitted, so the two can be compared), `undo_changes` (every result also carries `previous`, the
@@ -63,9 +67,9 @@ makes an ENA request at all.
   ENA indexes (`fields_for_accessions`, ~200 fields for a run against the Reports API's five;
   `list_records(..., full_fields=True)` merges it into a listing, alongside the record's own
   submitted XML — every checklist attribute, from the Browser API, which is the only one of the
-  two that answers in the test environment. An attribute keeps its tag as the column name unless
-  the row already has a column of that name, in which case it moves to `attr:<tag>` rather than
-  losing to it). Transport is
+  two that answers in the test environment. Attributes are named `attr:<tag>`, a namespace that
+  both settles the collisions — a checklist may tag something `title`, and so does every report row
+  — and marks the columns a MODIFY can address as attributes). Transport is
   [`ena-api-handler`](https://github.com/EBI-Metagenomics/ena-api-handler) rather than
   `ena-api-client`, which owns the Webin account APIs; what lives here is the behaviour on top —
   which Portal result answers for which entity, turning an accession into a query (including
