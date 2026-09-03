@@ -184,8 +184,8 @@ class TestListRecords:
 
         rows = records.list_records(CREDS, "samples", test=True, full_fields=True)
 
-        assert rows[0]["collection date"] == "2024-05-01"
-        assert rows[0]["depth"] == "30 cm"  # the units belong with the value
+        assert rows[0]["attr:collection date"] == "2024-05-01"
+        assert rows[0]["attr:depth"] == "30 cm"  # the units belong with the value
         assert rows[0]["taxon_id"] == "410658"
         assert rows[0]["scientific_name"] == "soil metagenome"
         # An attribute's own <TAG>/<VALUE> leaves are not fields in their own right.
@@ -209,10 +209,9 @@ class TestListRecords:
 
         row = records.list_records(CREDS, "samples", test=True, full_fields=True)[0]
 
-        assert row["title"] == "Report title"                      # the report still wins
+        assert row["title"] == "Report title"                      # the report column is untouched
         assert row["attr:title"] == "What the checklist calls it"   # and the attribute survives
-        assert row["host"] == "Homo sapiens"                        # an uncontested tag is untouched
-        assert "attr:host" not in row
+        assert row["attr:host"] == "Homo sapiens"
 
     def test_full_fields_matches_the_xml_on_either_accession_form(self, fake_client, monkeypatch):
         monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
@@ -502,6 +501,102 @@ class TestPreviewModifyRecords:
     def test_rejects_unmodifiable_entity(self, fake_client):
         with pytest.raises(ValueError, match="cannot be modified"):
             records.preview_modify_records(CREDS, "files", [{"accession": "x", "changes": {}}], test=True)
+
+
+class TestAttributeChanges:
+    XML = b"""<?xml version="1.0"?>
+<SAMPLE_SET><SAMPLE alias="s1" accession="ERS9000001">
+  <TITLE>Old title</TITLE>
+  <SAMPLE_ATTRIBUTES>
+    <SAMPLE_ATTRIBUTE><TAG>collection date</TAG><VALUE>2024-05-01</VALUE></SAMPLE_ATTRIBUTE>
+    <SAMPLE_ATTRIBUTE><TAG>depth</TAG><VALUE>30</VALUE><UNITS>cm</UNITS></SAMPLE_ATTRIBUTE>
+    <SAMPLE_ATTRIBUTE><TAG>host</TAG></SAMPLE_ATTRIBUTE>
+    <SAMPLE_ATTRIBUTE><TAG>ENA-CHECKLIST</TAG><VALUE>ERC000011</VALUE></SAMPLE_ATTRIBUTE>
+  </SAMPLE_ATTRIBUTES>
+</SAMPLE></SAMPLE_SET>"""
+
+    def submitted_attributes(self, fake_client) -> dict[str, str]:
+        record = etree.fromstring(fake_client.submitted[-1]).find(".//SAMPLE")
+        return {
+            a.findtext("TAG"): " ".join(
+                part for part in (a.findtext("VALUE"), a.findtext("UNITS")) if part
+            )
+            for a in record.iter("SAMPLE_ATTRIBUTE")
+        }
+
+    def test_changes_the_attribute_and_leaves_the_others_alone(self, fake_client):
+        fake_client._xml = self.XML
+        result = records.modify_records(
+            CREDS,
+            "samples",
+            [{"accession": "ERS9000001", "changes": {"attr:collection date": "2025-01-31"}}],
+            test=True,
+        )
+        assert result["success"] is True
+        attributes = self.submitted_attributes(fake_client)
+        assert attributes["collection date"] == "2025-01-31"
+        assert attributes["depth"] == "30 cm"
+        assert attributes["ENA-CHECKLIST"] == "ERC000011"
+
+    def test_a_units_attribute_keeps_its_units(self, fake_client):
+        """A listing shows value and unit as one string, so an edit comes back
+        with the unit on it — and <UNITS> is where the unit lives."""
+        fake_client._xml = self.XML
+        records.modify_records(
+            CREDS, "samples", [{"accession": "ERS9000001", "changes": {"attr:depth": "45 cm"}}], test=True
+        )
+        record = etree.fromstring(fake_client.submitted[-1]).find(".//SAMPLE")
+        depth = next(a for a in record.iter("SAMPLE_ATTRIBUTE") if a.findtext("TAG") == "depth")
+        assert depth.findtext("VALUE") == "45"
+        assert depth.findtext("UNITS") == "cm"
+
+    def test_an_attribute_with_no_value_element_gets_one_in_the_right_place(self, fake_client):
+        fake_client._xml = self.XML
+        records.modify_records(
+            CREDS, "samples", [{"accession": "ERS9000001", "changes": {"attr:host": "Homo sapiens"}}], test=True
+        )
+        record = etree.fromstring(fake_client.submitted[-1]).find(".//SAMPLE")
+        host = next(a for a in record.iter("SAMPLE_ATTRIBUTE") if a.findtext("TAG") == "host")
+        assert [child.tag for child in host] == ["TAG", "VALUE"]  # the XSD fixes that order
+        assert host.findtext("VALUE") == "Homo sapiens"
+
+    def test_ena_maintained_tags_are_refused(self, fake_client):
+        fake_client._xml = self.XML
+        result = records.modify_records(
+            CREDS,
+            "samples",
+            [{"accession": "ERS9000001", "changes": {"attr:ENA-CHECKLIST": "ERC000012"}}],
+            test=True,
+        )
+        assert result["success"] is False
+        assert "maintained by ENA" in result["results"][0]["messages"][0]
+        assert fake_client.submitted == []
+
+    def test_a_tag_the_record_does_not_have_is_refused(self, fake_client):
+        """Adding an attribute is a different job: where it may legally sit and
+        whether the record's checklist knows the tag are not knowable here."""
+        fake_client._xml = self.XML
+        result = records.modify_records(
+            CREDS,
+            "samples",
+            [{"accession": "ERS9000001", "changes": {"attr:host sex": "female"}}],
+            test=True,
+        )
+        assert result["success"] is False
+        assert "no 'host sex' attribute" in result["results"][0]["messages"][0]
+        assert fake_client.submitted == []
+
+    def test_the_undo_of_an_attribute_change_restores_it(self, fake_client):
+        fake_client._xml = self.XML
+        done = records.modify_records(
+            CREDS,
+            "samples",
+            [{"accession": "ERS9000001", "changes": {"attr:depth": "45 cm"}}],
+            test=True,
+        )
+        assert records.undo_changes(done) == [
+            {"accession": "ERS9000001", "changes": {"attr:depth": "30 cm"}}
+        ]
 
 
 class TestUndoChanges:

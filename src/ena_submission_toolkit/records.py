@@ -91,10 +91,33 @@ _EDITABLE: Final[dict[str, dict[str, tuple[str, str]]]] = {
     "files": {},
 }
 
-#: Namespace for a checklist attribute whose tag is already a column of the
-#: row it is being merged into. Not a prefix on every attribute: a tag is the
-#: vocabulary the submitter used, and most of them collide with nothing.
+#: Namespace for a record's checklist attributes, on every one of them.
+#:
+#: A tag is the submitter's own vocabulary and reads better bare, which is how
+#: this started — but nothing downstream could then tell ``collection date``
+#: (an attribute, editable, addressed by its tag inside a list that differs per
+#: record) from ``process_status`` (a report column, not editable, not in the
+#: XML at all). Editing needs that distinction, and a prefix is the whole of
+#: it: a caller strips it for display, and hands it back unchanged in a change
+#: set. It also settles the collisions — a checklist may tag an attribute
+#: ``title``, and every report row already has one.
 ATTRIBUTE_PREFIX: Final = "attr:"
+
+# Entity -> where its record XML keeps the TAG/VALUE attribute list. This is
+# where a checklist's fields live, and where a change to one has to be written.
+_ATTRIBUTE_PATHS: Final[dict[str, str]] = {
+    "studies": "PROJECT_ATTRIBUTES/PROJECT_ATTRIBUTE",
+    "samples": "SAMPLE_ATTRIBUTES/SAMPLE_ATTRIBUTE",
+    "experiments": "EXPERIMENT_ATTRIBUTES/EXPERIMENT_ATTRIBUTE",
+    "runs": "RUN_ATTRIBUTES/RUN_ATTRIBUTE",
+    "analyses": "ANALYSIS_ATTRIBUTES/ANALYSIS_ATTRIBUTE",
+}
+
+#: Tags ENA maintains itself (``ENA-CHECKLIST``, ``ENA-FIRST-PUBLIC``,
+#: ``ENA-LAST-UPDATE``). Readable, never editable: they are ENA's bookkeeping,
+#: not the submitter's data, and a MODIFY that changed one would either be
+#: rejected or quietly overwritten.
+_RESERVED_ATTRIBUTE_PREFIX: Final = "ENA-"
 
 #: How many accessions to ask the Browser API for in one request.
 _XML_BATCH: Final = 100
@@ -133,7 +156,12 @@ def validate_credentials(creds: Credentials, *, test: bool) -> None:
 
 
 def editable_columns(entity: str) -> list[str]:
-    """The fields :func:`modify_records` knows how to change on this entity.
+    """The fixed fields :func:`modify_records` knows how to change.
+
+    Not the whole editable set: a record's checklist attributes are editable
+    too, and they cannot be listed here because they differ per record. They
+    arrive on a listing as :data:`ATTRIBUTE_PREFIX` columns and go back in a
+    change set under the same name — see :func:`modify_records`.
 
     Example:
         >>> editable_columns("studies")
@@ -384,15 +412,12 @@ def _merge_xml_fields(creds: Credentials, entity: str, rows: list[dict[str, Any]
             # actions key off.
             for name, value in leaves.items():
                 row.setdefault(name, value)
-            # A checklist may tag an attribute anything, including a name the
-            # report or the record structure already uses — ENA's own sample
-            # checklists have a "description", and so does every report row.
-            # Merging it flat would silently drop whichever lost, so a taken
-            # name sends the attribute to its own namespace instead. Which
-            # name it gets is the same for every row of a listing: the keys it
-            # collides with come from the report model, not from the record.
+            # Attributes keep their own namespace: it is what tells a caller
+            # which columns are editable as attributes and which tag each one
+            # writes back to, and it keeps a checklist that tags something
+            # "title" from colliding with the report column of that name.
             for tag, value in attributes.items():
-                row.setdefault(tag if tag not in row else ATTRIBUTE_PREFIX + tag, value)
+                row.setdefault(ATTRIBUTE_PREFIX + tag, value)
             break
 
 
@@ -497,6 +522,30 @@ def _keep_by_link(
     return bool(ids & related) if related else True
 
 
+def _current_value(record: etree._Element, entity: str, field: str) -> str | None:
+    """What the record's XML holds for one editable field, attributes included.
+
+    The value an undo puts back, so it has to answer for the same fields
+    :func:`_apply_change` writes — including a checklist attribute, in the
+    joined "value unit" form a listing shows, which is what
+    :func:`_apply_attribute_change` takes back.
+    """
+    if field.startswith(ATTRIBUTE_PREFIX):
+        path = _ATTRIBUTE_PATHS.get(entity, "")
+        tag = field[len(ATTRIBUTE_PREFIX) :].strip()
+        if not path or not tag:
+            return None
+        for attribute in record.findall(path):
+            if (attribute.findtext("TAG") or "").strip() != tag:
+                continue
+            value = (attribute.findtext("VALUE") or "").strip()
+            units = (attribute.findtext("UNITS") or "").strip()
+            return f"{value} {units}".strip() if units else value
+        return None
+    kind, name = _EDITABLE[entity][field]
+    return _read_field(record, kind, name)
+
+
 def _read_field(record: etree._Element, kind: str, name: str) -> str | None:
     """The record XML's current value for one editable field, or ``None``."""
     return record.get(name) if kind == "attr" else record.findtext(name)
@@ -586,7 +635,55 @@ def _find_record(document: etree._Element, record_tag: str) -> etree._Element:
     return found[0]
 
 
+def _apply_attribute_change(record: etree._Element, entity: str, field: str, value: Any) -> None:
+    """Write one checklist attribute's value into the record's XML.
+
+    ``field`` is the column name a listing hands out — the attribute's tag
+    under :data:`ATTRIBUTE_PREFIX`. The tag is the address: it is matched
+    against each ``<TAG>`` in the record's attribute list, because an
+    attribute's position in that list is not stable and means nothing.
+
+    Only a tag the record already carries can be written. Adding one is a
+    different job — where an attribute may legally sit in the document, which
+    checklist the record declares, and whether that checklist knows the tag —
+    and none of it is knowable here; ``LookupError`` says so rather than
+    guessing a position and having ENA reject the whole document.
+    """
+    path = _ATTRIBUTE_PATHS.get(entity, "")
+    tag = field[len(ATTRIBUTE_PREFIX) :].strip()
+    if not path or not tag:
+        raise ValueError(f"{field!r} is not editable on {entity}")
+    if tag.upper().startswith(_RESERVED_ATTRIBUTE_PREFIX):
+        raise ValueError(f"{tag!r} is maintained by ENA and cannot be changed")
+
+    attribute = next(
+        (a for a in record.findall(path) if (a.findtext("TAG") or "").strip() == tag), None
+    )
+    if attribute is None:
+        raise LookupError(f"The record's XML has no {tag!r} attribute to change")
+
+    text = "" if value is None else str(value)
+    units = attribute.find("UNITS")
+    unit_text = (units.text or "").strip() if units is not None else ""
+    if unit_text and text.endswith(f" {unit_text}"):
+        # A listing shows "30 cm" — value and unit joined, because a grid cell
+        # holds one string. Edit it to "45 cm" and the unit comes back with it;
+        # it belongs in <UNITS>, which is where it already is.
+        text = text[: -len(unit_text)].strip()
+
+    element = attribute.find("VALUE")
+    if element is None:
+        # <TAG>, then <VALUE>, then <UNITS>: the XSD fixes that order, and TAG
+        # is mandatory so index 1 is always right.
+        element = etree.Element("VALUE")
+        attribute.insert(1, element)
+    element.text = text
+
+
 def _apply_change(record: etree._Element, entity: str, field: str, value: Any) -> None:
+    if field.startswith(ATTRIBUTE_PREFIX):
+        _apply_attribute_change(record, entity, field, value)
+        return
     mapping = _EDITABLE.get(entity, {})
     if field not in mapping:
         raise ValueError(f"{field!r} is not editable on {entity}")
@@ -654,9 +751,9 @@ def _build_manifests(
             # back. _modify_document() re-parents the element it is given, so
             # the undo gets a copy.
             result["previous"] = {
-                field: _read_field(record, *_EDITABLE[entity][field])
+                field: _current_value(record, entity, field)
                 for field in changes
-                if field in _EDITABLE.get(entity, {})
+                if field.startswith(ATTRIBUTE_PREFIX) or field in _EDITABLE.get(entity, {})
             }
             result["undo_xml"] = _modify_document(
                 copy.deepcopy(record), entity, submission_alias
@@ -713,7 +810,17 @@ def modify_records(
 
     ``records`` is ``[{"accession": ..., "changes": {field: value}}]`` — the
     shape a grid's change set narrows to once the host has filtered it to the
-    fields it allows (see :func:`editable_columns`).
+    fields it allows.
+
+    A field is either one of :func:`editable_columns` for the entity, or a
+    checklist attribute the record already carries, named as the listing named
+    it: its tag under :data:`ATTRIBUTE_PREFIX`, e.g. ``attr:collection date``.
+    An attribute is addressed by its tag, not its position, and its unit stays
+    in ``<UNITS>`` — send back the joined ``"45 cm"`` a listing showed and the
+    unit is put back where it belongs. ENA's own ``ENA-*`` tags are refused,
+    as is a tag the record does not already have: adding one means knowing
+    where it may legally sit and whether the record's checklist knows it,
+    neither of which this module can answer.
 
     An ENA MODIFY **replaces** the whole object, and the Reports API returns
     only a handful of fields per record (alias, accession, title, status) — so
