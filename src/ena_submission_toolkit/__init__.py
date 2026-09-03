@@ -26,7 +26,7 @@ from __future__ import annotations
 import importlib.resources
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.1.4"  # keep in step with pyproject's version
 
 
 def xsd_dir() -> Path:
