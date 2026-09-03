@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ena-submission-toolkit"
-version = "0.1.3"
+version = "0.1.4"
 description = "Build and submit ENA records (studies, samples) from structured/DataHarmonizer-exported data."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,11 +20,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
-    # TODO: back to a tag once ena-api-client cuts the release carrying
-    # reports.xml. v0.1.2 predates it, and without it records._record_xml
-    # falls back to the Browser API, which serves no private record —
-    # no checklist attributes in a listing, and no MODIFY of a held record.
-    "ena-api-client @ git+https://github.com/timrozday-mgnify/ena-api-client.git@d6910cf2293277b1873464b82df7e1da2734b809",
+    # v0.1.3 is the release carrying reports.xml, which records._record_xml
+    # needs: without it every record read falls back to the Browser API,
+    # which serves no private record — no checklist attributes in a listing,
+    # and no MODIFY of a record the account still holds.
+    "ena-api-client @ git+https://github.com/timrozday-mgnify/ena-api-client.git@v0.1.3",
     "ena-api-handler @ git+https://github.com/EBI-Metagenomics/ena-api-handler.git@v3.0.0",
     "linkml-lib @ git+https://github.com/timrozday-mgnify/linkml-lib.git@v0.1.0",
     "httpx>=0.27",
