@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Final
@@ -312,6 +312,31 @@ def _merge_portal_fields(creds: Credentials, entity: str, rows: list[dict[str, A
             break
 
 
+def _record_xml(client: WebinClient, entity: str, accessions: Sequence[str]) -> bytes:
+    """The XML of records this account owns, falling back to the public copy.
+
+    The Reports API serves the account's own records from the moment they are
+    registered, private ones included. The Browser API does not: it answers 404
+    for a held record whether or not it is given credentials, which is why
+    everything here reads the Reports copy first.
+
+    The fallback is for the records this account does *not* own — the Portal
+    can list them, and the Browser API is the only place their XML exists. It
+    is tried only when the Reports API has nothing, so a private record never
+    depends on it.
+
+    Raises:
+        LookupError: Neither source holds any of these accessions.
+    """
+    report_entity = REPORT_METHODS.get(entity, "").removeprefix("list_")
+    if report_entity:
+        try:
+            return client.reports.xml(report_entity, accessions)
+        except LookupError:
+            pass
+    return client.browser.xml_many(list(accessions))
+
+
 def _xml_fields(record: etree._Element) -> tuple[dict[str, str], dict[str, str]]:
     """Everything one record's XML carries: ``(structural leaves, attributes)``.
 
@@ -391,7 +416,7 @@ def _merge_xml_fields(creds: Credentials, entity: str, rows: list[dict[str, Any]
         with webin_client(creds, test) as client:
             for start in range(0, len(wanted), _XML_BATCH):
                 try:
-                    payload = client.browser.xml_many(wanted[start : start + _XML_BATCH])
+                    payload = _record_xml(client, entity, wanted[start : start + _XML_BATCH])
                 except LookupError:
                     continue  # ENA holds none of this batch; the others still matter
                 for record in etree.fromstring(payload).iter(record_tag):
@@ -585,7 +610,7 @@ def read_editable_fields(
         for start in range(0, len(wanted), _XML_BATCH):
             batch = wanted[start : start + _XML_BATCH]
             try:
-                payload = client.browser.xml_many(batch)
+                payload = _record_xml(client, entity, batch)
             except LookupError:
                 continue  # ENA holds none of this batch; the others still matter
             for record in etree.fromstring(payload).iter(record_tag):
@@ -745,7 +770,7 @@ def _build_manifests(
             yield result, None
             continue
         try:
-            record = _find_record(etree.fromstring(client.browser.xml(accession)), record_tag)
+            record = _find_record(etree.fromstring(_record_xml(client, entity, [accession])), record_tag)
             # What ENA holds right now, before anything is patched: the values
             # to put back, and a ready-made MODIFY that puts the whole record
             # back. _modify_document() re-parents the element it is given, so

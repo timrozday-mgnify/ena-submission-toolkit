@@ -44,7 +44,9 @@ makes an ENA request at all.
   the run), `editable_columns`, `read_editable_fields` (the current value of the editable fields
   that only exist in the record XML — a run's title, an experiment's library and instrument — read
   in batches, so a grid can show them before anyone edits them),
-  `modify_records` (fetch the record's current XML, patch the edited fields, resubmit as a MODIFY —
+  `modify_records` (fetch the record's current XML from the Reports API — the account's own copy,
+  which is the only one that exists for a private record: the Browser API answers 404 for a held
+  record with or without credentials — patch the edited fields, resubmit as a MODIFY —
   never rebuilt from a report row, which would drop everything ENA holds but does not report. A
   field is one of `editable_columns` or a checklist attribute the record already carries, addressed
   by its tag as `attr:<tag>`; ENA's own `ENA-*` tags are refused, and so is a tag the record does

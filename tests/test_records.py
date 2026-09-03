@@ -55,15 +55,36 @@ class FakeClient:
         #: reports to differ from the entity being listed.
         self.rows_by_method: dict[str, list[Any]] = {}
         self._xml = xml
+        #: What the Reports API answers with; ``None`` means "not this
+        #: account's record", the case that falls through to the Browser API.
+        self._reports_xml: bytes | Exception | None = None
         self._processes: list[FakeProcess] = []
+        self.xml_entities: list[str] = []
         self.submitted: list[bytes] = []
         self.actions: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self.batches: list[list[str]] = []
+        self.browser_batches: list[list[str]] = []
         outer = self
 
         class Reports:
             def list_run_processes(self, **_kwargs: Any) -> list[FakeProcess]:
                 return outer._processes
+
+            def xml(self, entity: str, accessions: Any) -> bytes:
+                """The account's own records — where every XML read starts.
+
+                The Browser API cannot serve a private record, so this is what
+                the code under test actually calls; `outer._reports_xml = None`
+                makes this account own none of them and sends the caller to
+                the Browser fake instead.
+                """
+                outer.xml_entities.append(entity)
+                outer.batches.append(list(accessions))
+                if outer._reports_xml is None:
+                    raise LookupError("the Webin account holds none of these")
+                if isinstance(outer._reports_xml, Exception):
+                    raise outer._reports_xml
+                return outer._reports_xml
 
             def __getattr__(self, name: str):
                 return lambda **_kwargs: outer.rows_by_method.get(name, outer._rows)
@@ -75,7 +96,7 @@ class FakeClient:
                 return outer._xml
 
             def xml_many(self, accessions: list[str]) -> bytes:
-                outer.batches.append(list(accessions))
+                outer.browser_batches.append(list(accessions))
                 if isinstance(outer._xml, Exception):
                     raise outer._xml
                 return outer._xml
@@ -170,7 +191,7 @@ class TestListRecords:
         """The Browser API answers where the Portal cannot: the test
         environment, and a checklist attribute nothing indexes."""
         monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
-        fake_client._xml = b"""<?xml version="1.0"?>
+        fake_client._reports_xml = b"""<?xml version="1.0"?>
         <SAMPLE_SET><SAMPLE alias="s1" accession="ERS9000001">
           <IDENTIFIERS><PRIMARY_ID>ERS9000001</PRIMARY_ID><EXTERNAL_ID>SAMEA1</EXTERNAL_ID></IDENTIFIERS>
           <TITLE>Report title</TITLE>
@@ -197,7 +218,7 @@ class TestListRecords:
         """A checklist can tag an attribute anything, including a name already
         taken — merged flat, whichever lost would vanish without a trace."""
         monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
-        fake_client._xml = b"""<?xml version="1.0"?>
+        fake_client._reports_xml = b"""<?xml version="1.0"?>
         <SAMPLE_SET><SAMPLE alias="s1" accession="ERS9000001">
           <TITLE>Report title</TITLE>
           <SAMPLE_ATTRIBUTES>
@@ -215,7 +236,7 @@ class TestListRecords:
 
     def test_full_fields_matches_the_xml_on_either_accession_form(self, fake_client, monkeypatch):
         monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
-        fake_client._xml = b"""<?xml version="1.0"?>
+        fake_client._reports_xml = b"""<?xml version="1.0"?>
         <PROJECT_SET><PROJECT alias="p1" accession="PRJEB1">
           <IDENTIFIERS><PRIMARY_ID>PRJEB1</PRIMARY_ID><SECONDARY_ID>ERP1</SECONDARY_ID></IDENTIFIERS>
           <DESCRIPTION>What this study is</DESCRIPTION>
@@ -226,7 +247,7 @@ class TestListRecords:
 
     def test_a_failing_browser_still_returns_the_listing(self, fake_client, monkeypatch):
         monkeypatch.setattr(records.portal, "fields_for_accessions", lambda *a, **k: {})
-        fake_client._xml = RuntimeError("browser down")
+        fake_client._reports_xml = RuntimeError("browser down")
         fake_client._rows = [FakeRow(accession="ERS1", status="PRIVATE")]
         rows = records.list_records(CREDS, "samples", test=True, full_fields=True)
         assert [r["accession"] for r in rows] == ["ERS1"]
@@ -374,7 +395,7 @@ class TestRunProcessingStatus:
 
 class TestReadEditableFields:
     def test_reads_nested_experiment_fields(self, fake_client):
-        fake_client._xml = EXPERIMENT_XML
+        fake_client._reports_xml = EXPERIMENT_XML
         fields = records.read_editable_fields(CREDS, "experiments", ["ERX1"], test=True)
         assert fields["ERX1"] == {
             "alias": "exp-a",
@@ -388,7 +409,7 @@ class TestReadEditableFields:
         }
 
     def test_reads_run_fields_and_omits_absent_ones(self, fake_client):
-        fake_client._xml = RUN_XML
+        fake_client._reports_xml = RUN_XML
         assert records.read_editable_fields(CREDS, "runs", ["ERR1"], test=True)["ERR1"] == {
             "alias": "run-a",
             "title": "Old run title",
@@ -396,7 +417,7 @@ class TestReadEditableFields:
         }
 
     def test_batches_the_browser_requests(self, fake_client):
-        fake_client._xml = RUN_XML
+        fake_client._reports_xml = RUN_XML
         accessions = [f"ERR{n}" for n in range(1, records._XML_BATCH + 3)]
         records.read_editable_fields(CREDS, "runs", accessions, test=True)
         assert [len(batch) for batch in fake_client.batches] == [records._XML_BATCH, 2]
@@ -407,7 +428,7 @@ class TestReadEditableFields:
         assert fake_client.batches == []
 
     def test_a_batch_ena_does_not_hold_does_not_sink_the_rest(self, fake_client):
-        fake_client._xml = LookupError("ENA holds no XML")
+        fake_client._reports_xml = LookupError("ENA holds no XML")
         assert records.read_editable_fields(CREDS, "runs", ["ERR1"], test=True) == {}
 
 
@@ -503,6 +524,38 @@ class TestPreviewModifyRecords:
             records.preview_modify_records(CREDS, "files", [{"accession": "x", "changes": {}}], test=True)
 
 
+class TestRecordXmlSource:
+    """Where a record's XML comes from, now that it matters which.
+
+    The Browser API answers 404 for a private record — with credentials, for
+    a record the account submitted itself — so reading it there meant a held
+    record had no attributes in a listing and no MODIFY at all.
+    """
+
+    def test_a_private_record_is_read_from_the_account_not_the_browser(self, fake_client):
+        fake_client._reports_xml = SAMPLE_XML
+        result = records.preview_modify_records(
+            CREDS, "samples", [{"accession": "ERS9000001", "changes": {"title": "New"}}], test=True
+        )
+        assert result["success"] is True
+        assert fake_client.xml_entities == ["samples"]     # ENA calls a study a project, a sample a sample
+        assert fake_client.browser_batches == []           # never asked, so a 404 there cannot break this
+
+    def test_a_study_is_asked_for_as_a_project(self, fake_client):
+        fake_client._reports_xml = b'<PROJECT_SET><PROJECT accession="PRJEB1"><TITLE>T</TITLE></PROJECT></PROJECT_SET>'
+        records.read_editable_fields(CREDS, "studies", ["PRJEB1"], test=True)
+        assert fake_client.xml_entities == ["projects"]
+
+    def test_a_record_the_account_does_not_own_falls_back_to_the_browser(self, fake_client):
+        """The Portal can list somebody else's records; the Browser API is the
+        only place their XML exists."""
+        fake_client._reports_xml = None          # ENA: "none of these are yours"
+        fake_client._xml = SAMPLE_XML
+        fields = records.read_editable_fields(CREDS, "samples", ["ERS9000001"], test=True)
+        assert fields["ERS9000001"]["title"] == "Old title"
+        assert fake_client.browser_batches == [["ERS9000001"]]
+
+
 class TestAttributeChanges:
     XML = b"""<?xml version="1.0"?>
 <SAMPLE_SET><SAMPLE alias="s1" accession="ERS9000001">
@@ -525,7 +578,7 @@ class TestAttributeChanges:
         }
 
     def test_changes_the_attribute_and_leaves_the_others_alone(self, fake_client):
-        fake_client._xml = self.XML
+        fake_client._reports_xml = self.XML
         result = records.modify_records(
             CREDS,
             "samples",
@@ -541,7 +594,7 @@ class TestAttributeChanges:
     def test_a_units_attribute_keeps_its_units(self, fake_client):
         """A listing shows value and unit as one string, so an edit comes back
         with the unit on it — and <UNITS> is where the unit lives."""
-        fake_client._xml = self.XML
+        fake_client._reports_xml = self.XML
         records.modify_records(
             CREDS, "samples", [{"accession": "ERS9000001", "changes": {"attr:depth": "45 cm"}}], test=True
         )
@@ -551,7 +604,7 @@ class TestAttributeChanges:
         assert depth.findtext("UNITS") == "cm"
 
     def test_an_attribute_with_no_value_element_gets_one_in_the_right_place(self, fake_client):
-        fake_client._xml = self.XML
+        fake_client._reports_xml = self.XML
         records.modify_records(
             CREDS, "samples", [{"accession": "ERS9000001", "changes": {"attr:host": "Homo sapiens"}}], test=True
         )
@@ -561,7 +614,7 @@ class TestAttributeChanges:
         assert host.findtext("VALUE") == "Homo sapiens"
 
     def test_ena_maintained_tags_are_refused(self, fake_client):
-        fake_client._xml = self.XML
+        fake_client._reports_xml = self.XML
         result = records.modify_records(
             CREDS,
             "samples",
@@ -575,7 +628,7 @@ class TestAttributeChanges:
     def test_a_tag_the_record_does_not_have_is_refused(self, fake_client):
         """Adding an attribute is a different job: where it may legally sit and
         whether the record's checklist knows the tag are not knowable here."""
-        fake_client._xml = self.XML
+        fake_client._reports_xml = self.XML
         result = records.modify_records(
             CREDS,
             "samples",
@@ -587,7 +640,7 @@ class TestAttributeChanges:
         assert fake_client.submitted == []
 
     def test_the_undo_of_an_attribute_change_restores_it(self, fake_client):
-        fake_client._xml = self.XML
+        fake_client._reports_xml = self.XML
         done = records.modify_records(
             CREDS,
             "samples",
@@ -665,7 +718,7 @@ class TestRecordAction:
 
 class TestModifyNestedFields:
     def test_patches_an_experiment_library_field_in_place(self, fake_client):
-        fake_client._xml = EXPERIMENT_XML
+        fake_client._reports_xml = EXPERIMENT_XML
         result = records.modify_records(
             CREDS,
             "experiments",
@@ -689,7 +742,7 @@ class TestModifyNestedFields:
         assert document.find(".//LIBRARY_LAYOUT/PAIRED") is not None
 
     def test_patches_a_run_title(self, fake_client):
-        fake_client._xml = RUN_XML
+        fake_client._reports_xml = RUN_XML
         records.modify_records(
             CREDS,
             "runs",
@@ -701,7 +754,7 @@ class TestModifyNestedFields:
         assert document.find(".//RUN/EXPERIMENT_REF").get("accession") == "ERX1"
 
     def test_a_field_the_xml_has_no_element_for_is_reported_not_invented(self, fake_client):
-        fake_client._xml = RUN_XML
+        fake_client._reports_xml = RUN_XML
         result = records.modify_records(
             CREDS,
             "runs",
